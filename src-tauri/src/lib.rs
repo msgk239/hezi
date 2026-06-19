@@ -1,0 +1,550 @@
+use arboard::Clipboard;
+use pathdiff::diff_paths;
+use serde::{Deserialize, Serialize};
+use std::cmp::Ordering as CmpOrdering;
+#[cfg(target_os = "windows")]
+use std::collections::HashMap;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+#[cfg(target_os = "windows")]
+use std::sync::{Mutex, OnceLock};
+use tauri::{LogicalPosition, LogicalSize, Manager, Runtime, WebviewWindow};
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ProjectItem {
+    id: String,
+    name: String,
+    path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct OpenedFileRef {
+    path: String,
+    project_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct AppSettings {
+    font_size: u32,
+    sidebar_width: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct AppConfig {
+    projects: Vec<ProjectItem>,
+    opened_files: Vec<OpenedFileRef>,
+    active_file_path: String,
+    active_project_id: Option<String>,
+    #[serde(default)]
+    expanded_paths: Vec<String>,
+    #[serde(default)]
+    tree_state_initialized: bool,
+    settings: AppSettings,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectFolderSelection {
+    path: String,
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DirectoryEntry {
+    name: String,
+    path: String,
+    #[serde(rename = "type")]
+    entry_type: String,
+    size: Option<u64>,
+    modified_at: Option<u128>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PathInfo {
+    path: String,
+    name: String,
+    extension: String,
+    exists: bool,
+    #[serde(rename = "type")]
+    entry_type: String,
+    size: u64,
+    modified_at: u128,
+}
+
+const CONFIG_FILE_NAME: &str = "project-box-config.json";
+const IGNORED_DIRS: &[&str] = &[
+    "node_modules",
+    ".git",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+    ".cache",
+    "vendor",
+    "target",
+];
+
+fn default_config() -> AppConfig {
+    AppConfig {
+        projects: vec![],
+        opened_files: vec![],
+        active_file_path: String::new(),
+        active_project_id: Some(String::new()),
+        expanded_paths: vec![],
+        tree_state_initialized: false,
+        settings: AppSettings {
+            font_size: 14,
+            sidebar_width: 280,
+        },
+    }
+}
+
+fn err(action: &str, error: impl std::fmt::Display) -> String {
+    format!("{action}失败：{error}")
+}
+
+fn path_to_string(path: impl AsRef<Path>) -> String {
+    path.as_ref().to_string_lossy().to_string()
+}
+
+fn file_name(path: impl AsRef<Path>) -> String {
+    path.as_ref()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| path_to_string(path))
+}
+
+fn modified_at_ms(metadata: &fs::Metadata) -> Option<u128> {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis())
+}
+
+fn config_dir() -> Result<PathBuf, String> {
+    if let Ok(test_dir) = std::env::var("PROJECT_BOX_CONFIG_DIR") {
+        return Ok(PathBuf::from(test_dir));
+    }
+
+    dirs::config_dir()
+        .map(|dir| dir.join("project-box"))
+        .ok_or_else(|| "无法定位用户配置目录".to_string())
+}
+
+fn config_path() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join(CONFIG_FILE_NAME))
+}
+
+#[tauri::command]
+fn get_config() -> Result<AppConfig, String> {
+    let path = config_path().map_err(|error| err("读取配置", error))?;
+
+    if !path.exists() {
+        let config = default_config();
+        save_config(config.clone())?;
+        return Ok(config);
+    }
+
+    let raw = fs::read_to_string(&path).map_err(|error| err("读取配置", error))?;
+    serde_json::from_str(&raw).map_err(|error| err("解析配置", error))
+}
+
+#[tauri::command]
+fn save_config(config: AppConfig) -> Result<(), String> {
+    let path = config_path().map_err(|error| err("保存配置", error))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| err("保存配置", "配置路径无效"))?;
+    fs::create_dir_all(parent).map_err(|error| err("创建配置目录", error))?;
+    let raw = serde_json::to_string_pretty(&config).map_err(|error| err("序列化配置", error))?;
+    fs::write(path, format!("{raw}\n")).map_err(|error| err("保存配置", error))
+}
+
+#[tauri::command]
+fn select_project_folder() -> Result<Option<ProjectFolderSelection>, String> {
+    if let Ok(test_path) = std::env::var("PROJECT_BOX_TEST_PROJECT_PATH") {
+        let path = PathBuf::from(test_path);
+        return Ok(Some(ProjectFolderSelection {
+            name: file_name(&path),
+            path: path_to_string(path),
+        }));
+    }
+
+    let folder = rfd::FileDialog::new()
+        .set_title("选择项目文件夹")
+        .pick_folder();
+
+    Ok(folder.map(|path| ProjectFolderSelection {
+        name: file_name(&path),
+        path: path_to_string(path),
+    }))
+}
+
+#[tauri::command]
+fn read_dir(dir_path: String) -> Result<Vec<DirectoryEntry>, String> {
+    let mut entries = vec![];
+    let read_dir = fs::read_dir(&dir_path).map_err(|error| err("读取目录", error))?;
+
+    for entry in read_dir {
+        let entry = entry.map_err(|error| err("读取目录项", error))?;
+        let path = entry.path();
+        let metadata = entry
+            .metadata()
+            .map_err(|error| err("读取路径信息", error))?;
+
+        let is_dir = metadata.is_dir();
+        let is_file = metadata.is_file();
+        if !is_dir && !is_file {
+            continue;
+        }
+
+        let name = file_name(&path);
+        if is_dir
+            && IGNORED_DIRS
+                .iter()
+                .any(|ignored| ignored.eq_ignore_ascii_case(&name))
+        {
+            continue;
+        }
+
+        entries.push(DirectoryEntry {
+            name,
+            path: path_to_string(&path),
+            entry_type: if is_dir { "directory" } else { "file" }.to_string(),
+            size: Some(metadata.len()),
+            modified_at: modified_at_ms(&metadata),
+        });
+    }
+
+    entries.sort_by(
+        |a, b| match (a.entry_type.as_str(), b.entry_type.as_str()) {
+            ("directory", "file") => CmpOrdering::Less,
+            ("file", "directory") => CmpOrdering::Greater,
+            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        },
+    );
+
+    Ok(entries)
+}
+
+#[tauri::command]
+fn read_file(file_path: String) -> Result<String, String> {
+    fs::read_to_string(file_path).map_err(|error| err("读取文件", error))
+}
+
+#[tauri::command]
+fn write_file(file_path: String, content: String) -> Result<(), String> {
+    fs::write(file_path, content).map_err(|error| err("保存文件", error))
+}
+
+#[tauri::command]
+fn create_file(file_path: String) -> Result<(), String> {
+    let path = PathBuf::from(file_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| err("创建父目录", error))?;
+    }
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| err("新建文件", error))?;
+    file.write_all(b"").map_err(|error| err("新建文件", error))
+}
+
+#[tauri::command]
+fn create_folder(folder_path: String) -> Result<(), String> {
+    fs::create_dir_all(folder_path).map_err(|error| err("新建文件夹", error))
+}
+
+#[tauri::command]
+fn rename_path(old_path: String, new_path: String) -> Result<(), String> {
+    if Path::new(&new_path).exists() {
+        return Err(err("重命名", "目标路径已存在"));
+    }
+
+    fs::rename(old_path, new_path).map_err(|error| err("重命名", error))
+}
+
+#[tauri::command]
+fn delete_path(path: String) -> Result<(), String> {
+    trash::delete(path).map_err(|error| err("删除到回收站", error))
+}
+
+#[tauri::command]
+fn open_with_default_app(path: String) -> Result<(), String> {
+    open::that(path).map_err(|error| err("用默认应用打开", error))
+}
+
+#[tauri::command]
+fn reveal_in_explorer(path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer.exe")
+            .arg(format!("/select,{}", path))
+            .spawn()
+            .map_err(|error| err("在资源管理器中显示", error))?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let parent = Path::new(&path)
+            .parent()
+            .map(path_to_string)
+            .unwrap_or(path);
+        open::that(parent).map_err(|error| err("在文件管理器中显示", error))
+    }
+}
+
+#[tauri::command]
+fn copy_to_clipboard(text: String) -> Result<(), String> {
+    let mut clipboard = Clipboard::new().map_err(|error| err("打开剪贴板", error))?;
+    clipboard
+        .set_text(text)
+        .map_err(|error| err("复制到剪贴板", error))
+}
+
+#[tauri::command]
+fn path_relative(root_path: String, target_path: String) -> Result<String, String> {
+    let root = PathBuf::from(root_path);
+    let target = PathBuf::from(target_path);
+    let relative = diff_paths(&target, &root).ok_or_else(|| err("计算相对路径", "路径无效"))?;
+    Ok(relative.to_string_lossy().replace('\\', "/"))
+}
+
+#[tauri::command]
+fn get_path_info(path: String) -> Result<PathInfo, String> {
+    let target = PathBuf::from(&path);
+
+    if !target.exists() {
+        return Ok(PathInfo {
+            name: file_name(&target),
+            extension: target
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| format!(".{}", ext.to_lowercase()))
+                .unwrap_or_default(),
+            path,
+            exists: false,
+            entry_type: "missing".to_string(),
+            size: 0,
+            modified_at: 0,
+        });
+    }
+
+    let metadata = fs::metadata(&target).map_err(|error| err("读取路径信息", error))?;
+    Ok(PathInfo {
+        name: file_name(&target),
+        extension: target
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| format!(".{}", ext.to_lowercase()))
+            .unwrap_or_default(),
+        path,
+        exists: true,
+        entry_type: if metadata.is_dir() {
+            "directory"
+        } else {
+            "file"
+        }
+        .to_string(),
+        size: metadata.len(),
+        modified_at: modified_at_ms(&metadata).unwrap_or_default(),
+    })
+}
+
+fn fit_window_to_work_area<R: Runtime>(window: &WebviewWindow<R>) {
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten());
+
+    let Some(monitor) = monitor else {
+        return;
+    };
+
+    let scale_factor = monitor.scale_factor();
+    let work_area = monitor.work_area();
+    let work_size = work_area.size.to_logical::<f64>(scale_factor);
+    let work_position = work_area.position.to_logical::<f64>(scale_factor);
+
+    let usable_width = (work_size.width - 48.0).max(720.0);
+    let usable_height = (work_size.height - 96.0).max(460.0);
+    let target_width = 1280.0_f64.min(usable_width);
+    let target_height = 760.0_f64.min(usable_height);
+    let min_width = 760.0_f64.min(target_width);
+    let min_height = 480.0_f64.min(target_height);
+    let target_x = work_position.x + ((work_size.width - target_width) / 2.0).max(0.0);
+    let target_y = work_position.y + ((work_size.height - target_height) / 2.0).max(0.0);
+
+    let _ = window.set_min_size(Some(LogicalSize::new(min_width, min_height)));
+    let _ = window.set_max_size(Some(LogicalSize::new(work_size.width, work_size.height)));
+    let _ = window.set_size(LogicalSize::new(target_width, target_height));
+    let _ = window.set_position(LogicalPosition::new(target_x, target_y));
+}
+
+fn fit_main_window_to_work_area<R: Runtime>(app: &mut tauri::App<R>) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+
+    fit_window_to_work_area(&window);
+    install_windows_maximize_work_area_hook(&window);
+}
+
+#[cfg(target_os = "windows")]
+type WindowProcMap = Mutex<HashMap<isize, isize>>;
+
+#[cfg(target_os = "windows")]
+fn original_window_procs() -> &'static WindowProcMap {
+    static ORIGINAL_WINDOW_PROCS: OnceLock<WindowProcMap> = OnceLock::new();
+    ORIGINAL_WINDOW_PROCS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(target_os = "windows")]
+fn install_windows_maximize_work_area_hook<R: Runtime>(window: &WebviewWindow<R>) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, GWLP_WNDPROC,
+    };
+
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+
+    let hwnd_key = hwnd.0 as isize;
+    let hook_proc = work_area_window_proc as *const () as usize as isize;
+    let current_proc = unsafe { GetWindowLongPtrW(hwnd, GWLP_WNDPROC) };
+
+    if current_proc == hook_proc {
+        return;
+    }
+
+    let previous_proc = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, hook_proc) };
+    if previous_proc != 0 {
+        let _ = original_window_procs()
+            .lock()
+            .map(|mut procs| procs.insert(hwnd_key, previous_proc));
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn install_windows_maximize_work_area_hook<R: Runtime>(_window: &WebviewWindow<R>) {}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn work_area_window_proc(
+    hwnd: windows::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallWindowProcW, DefWindowProcW, WM_GETMINMAXINFO, WM_NCDESTROY, WNDPROC,
+    };
+
+    if msg == WM_GETMINMAXINFO {
+        apply_work_area_maximize_info(hwnd, lparam);
+        return windows::Win32::Foundation::LRESULT(0);
+    }
+
+    let hwnd_key = hwnd.0 as isize;
+    let original_proc = original_window_procs()
+        .lock()
+        .ok()
+        .and_then(|procs| procs.get(&hwnd_key).copied());
+
+    if msg == WM_NCDESTROY {
+        let _ = original_window_procs()
+            .lock()
+            .map(|mut procs| procs.remove(&hwnd_key));
+    }
+
+    if let Some(original_proc) = original_proc {
+        let proc: WNDPROC = std::mem::transmute(original_proc);
+        CallWindowProcW(proc, hwnd, msg, wparam, lparam)
+    } else {
+        DefWindowProcW(hwnd, msg, wparam, lparam)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn apply_work_area_maximize_info(
+    hwnd: windows::Win32::Foundation::HWND,
+    lparam: windows::Win32::Foundation::LPARAM,
+) {
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::MINMAXINFO;
+
+    let minmax = lparam.0 as *mut MINMAXINFO;
+    if minmax.is_null() {
+        return;
+    }
+
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    if monitor.0.is_null() {
+        return;
+    }
+
+    let mut monitor_info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+
+    if unsafe { GetMonitorInfoW(monitor, &mut monitor_info) } == false {
+        return;
+    }
+
+    let monitor_rect = monitor_info.rcMonitor;
+    let work_rect = monitor_info.rcWork;
+    let work_width = work_rect.right - work_rect.left;
+    let work_height = work_rect.bottom - work_rect.top;
+
+    unsafe {
+        (*minmax).ptMaxPosition.x = work_rect.left - monitor_rect.left;
+        (*minmax).ptMaxPosition.y = work_rect.top - monitor_rect.top;
+        (*minmax).ptMaxSize.x = work_width;
+        (*minmax).ptMaxSize.y = work_height;
+        (*minmax).ptMaxTrackSize.x = work_width;
+        (*minmax).ptMaxTrackSize.y = work_height;
+    }
+}
+
+pub fn run() {
+    tauri::Builder::default()
+        .setup(|app| {
+            fit_main_window_to_work_area(app);
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_config,
+            save_config,
+            select_project_folder,
+            read_dir,
+            read_file,
+            write_file,
+            create_file,
+            create_folder,
+            rename_path,
+            delete_path,
+            open_with_default_app,
+            reveal_in_explorer,
+            copy_to_clipboard,
+            path_relative,
+            get_path_info
+        ])
+        .run(tauri::generate_context!())
+        .expect("运行项目盒子失败");
+}
