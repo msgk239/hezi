@@ -76,14 +76,18 @@ export interface SelectedEntry {
   isProjectRoot?: boolean
 }
 
+export type EditorTabKind = 'text' | 'image' | 'audio'
+
 export interface EditorTab {
   path: string
   projectId: string
   projectRoot: string
   name: string
+  kind: EditorTabKind
   language: string
   content: string
   savedContent: string
+  mediaSrc?: string
 }
 
 export type UnsavedChoice = 'save' | 'discard' | 'cancel'

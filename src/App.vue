@@ -41,6 +41,7 @@
           :active-path="editorState.activePath"
           @select="handleSelectTab"
           @close="handleCloseTab"
+          @context-menu="openTabContextMenu"
         />
 
         <div v-if="activeTab && isMarkdownActive" class="editor-modebar">
@@ -63,13 +64,19 @@
         </div>
 
         <div class="editor-body">
+          <MediaPreview
+            v-if="activeTab && activeTab.kind !== 'text'"
+            :tab="activeTab"
+            @open-default="openDefaultApp"
+          />
+
           <MarkdownPreview
-            v-if="activeTab && isMarkdownActive && markdownMode === 'preview'"
+            v-else-if="activeTab && isMarkdownActive && markdownMode === 'preview'"
             :content="activeTab.content"
           />
 
           <CodeEditor
-            v-else-if="activeTab"
+            v-else-if="activeTab && activeTab.kind === 'text'"
             :key="activeTab.path"
             v-model="activeTab.content"
             :language="activeTab.language"
@@ -79,7 +86,7 @@
           />
 
           <div v-else-if="editorState.binaryNoticePath" class="empty-editor">
-            <div class="empty-title">该文件不是文本文件，无法直接编辑。</div>
+            <div class="empty-title">该文件暂不支持直接预览或编辑。</div>
             <div class="empty-text">可以使用默认应用打开。</div>
             <button class="top-button primary" type="button" @click="openBinaryWithDefaultApp">
               用默认应用打开
@@ -87,8 +94,8 @@
           </div>
 
           <div v-else class="empty-editor">
-            <div class="empty-title">选择左侧文本文件开始编辑</div>
-            <div class="empty-text">支持 md、json、js、ts、vue、html、css、py、go、rs 等普通文本文件。</div>
+            <div class="empty-title">选择左侧文件开始</div>
+            <div class="empty-text">文本文件可编辑，图片和常见音频文件可直接预览。</div>
           </div>
         </div>
       </section>
@@ -102,6 +109,14 @@
       :y="contextMenu.y"
       :items="contextMenu.items"
       @select="handleContextAction"
+    />
+
+    <ContextMenu
+      :visible="tabContextMenu.visible"
+      :x="tabContextMenu.x"
+      :y="tabContextMenu.y"
+      :items="tabContextMenu.items"
+      @select="handleTabContextAction"
     />
 
     <div v-if="notice" class="toast">{{ notice }}</div>
@@ -181,6 +196,7 @@ import CodeEditor from '@/components/CodeEditor.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
 import EditorTabs from '@/components/EditorTabs.vue'
 import MarkdownPreview from '@/components/MarkdownPreview.vue'
+import MediaPreview from '@/components/MediaPreview.vue'
 import ProjectSidebar from '@/components/ProjectSidebar.vue'
 import {
   addProjectFromDialog,
@@ -234,6 +250,14 @@ const contextMenu = reactive({
   items: [] as ContextMenuItem[]
 })
 
+const tabContextMenu = reactive({
+  visible: false,
+  x: 0,
+  y: 0,
+  path: '',
+  items: [] as ContextMenuItem[]
+})
+
 const dialogState = reactive({
   visible: false,
   mode: null as DialogMode,
@@ -252,11 +276,23 @@ const settingsDraft = reactive({
 })
 
 const selectedPath = computed(() => projectState.selectedEntry?.path || editorState.activePath)
-const isMarkdownActive = computed(() => activeTab.value?.language === 'markdown')
+const isMarkdownActive = computed(() => activeTab.value?.kind === 'text' && activeTab.value.language === 'markdown')
 
 let removeCloseListener: (() => void) | null = null
 let noticeTimer: number | undefined
 let resizingSidebar = false
+
+function hasTauriRuntime(): boolean {
+  return Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__)
+}
+
+async function closeCurrentWindow(): Promise<void> {
+  if (hasTauriRuntime()) {
+    await getCurrentWindow().close()
+  } else {
+    window.close()
+  }
+}
 
 function showNotice(message: string): void {
   if (!message) return
@@ -338,6 +374,7 @@ async function handleCloseTab(path: string): Promise<void> {
 }
 
 function openContextMenu(payload: { entry: SelectedEntry; x: number; y: number }): void {
+  tabContextMenu.visible = false
   contextMenu.visible = true
   contextMenu.x = Math.min(payload.x, window.innerWidth - 220)
   contextMenu.y = Math.min(payload.y, window.innerHeight - 320)
@@ -345,8 +382,31 @@ function openContextMenu(payload: { entry: SelectedEntry; x: number; y: number }
   contextMenu.items = buildContextItems(payload.entry)
 }
 
+function openTabContextMenu(payload: { path: string; x: number; y: number }): void {
+  contextMenu.visible = false
+  tabContextMenu.visible = true
+  tabContextMenu.x = Math.min(payload.x, window.innerWidth - 220)
+  tabContextMenu.y = Math.min(payload.y, window.innerHeight - 240)
+  tabContextMenu.path = payload.path
+  tabContextMenu.items = buildTabContextItems(payload.path)
+}
+
 function closeContextMenu(): void {
   contextMenu.visible = false
+  tabContextMenu.visible = false
+}
+
+function buildTabContextItems(path: string): ContextMenuItem[] {
+  const index = editorState.tabs.findIndex((tab) => tab.path === path)
+  const tabCount = editorState.tabs.length
+
+  return [
+    { id: 'tab-close', label: '关闭' },
+    { id: 'tab-close-others', label: '关闭其他文件', disabled: tabCount <= 1 },
+    { id: 'tab-close-left', label: '关闭左侧所有', disabled: index <= 0 },
+    { id: 'tab-close-right', label: '关闭右侧所有', disabled: index < 0 || index >= tabCount - 1 },
+    { id: 'tab-close-all', label: '关闭所有文件', disabled: tabCount === 0 }
+  ]
 }
 
 function buildContextItems(entry: SelectedEntry): ContextMenuItem[] {
@@ -355,8 +415,13 @@ function buildContextItems(entry: SelectedEntry): ContextMenuItem[] {
       { id: 'open', label: '打开' },
       { id: 'open-default', label: '用默认应用打开' },
       { id: 'reveal', label: '在资源管理器中显示' },
+      { id: 'separator-file-copy', label: '', separator: true },
+      { id: 'copy-name', label: '复制文件名' },
       { id: 'copy-relative', label: '复制相对路径' },
       { id: 'copy-absolute', label: '复制绝对路径' },
+      { id: 'copy-file', label: '复制文件' },
+      { id: 'cut-file', label: '剪切文件' },
+      { id: 'separator-file-edit', label: '', separator: true },
       { id: 'rename', label: '重命名' },
       { id: 'delete', label: '删除', danger: true }
     ]
@@ -367,8 +432,13 @@ function buildContextItems(entry: SelectedEntry): ContextMenuItem[] {
     { id: 'new-folder', label: '新建文件夹' },
     { id: 'open-default', label: '用默认应用打开' },
     { id: 'reveal', label: '在资源管理器中显示' },
+    { id: 'separator-folder-copy', label: '', separator: true },
+    { id: 'copy-name', label: '复制文件名' },
     { id: 'copy-relative', label: '复制相对路径' },
     { id: 'copy-absolute', label: '复制绝对路径' },
+    { id: 'copy-file', label: '复制文件' },
+    { id: 'cut-file', label: '剪切文件', disabled: entry.isProjectRoot },
+    { id: 'separator-folder-edit', label: '', separator: true },
     { id: 'rename', label: '重命名' }
   ]
 
@@ -389,8 +459,11 @@ async function handleContextAction(action: string): Promise<void> {
   if (action === 'open') await handleOpenFile(entry)
   if (action === 'open-default') await openDefaultApp(entry.path)
   if (action === 'reveal') await revealPath(entry.path)
+  if (action === 'copy-name') await copyFileName(entry)
   if (action === 'copy-relative') await copyRelativePath(entry)
   if (action === 'copy-absolute') await copyAbsolutePath(entry)
+  if (action === 'copy-file') await setFileClipboard(entry, 'copy')
+  if (action === 'cut-file') await setFileClipboard(entry, 'cut')
   if (action === 'new-file') await createFileInFolder(entry)
   if (action === 'new-folder') await createFolderInFolder(entry)
   if (action === 'rename') await renameEntry(entry)
@@ -398,9 +471,43 @@ async function handleContextAction(action: string): Promise<void> {
   if (action === 'project-remove') await removeProjectFromList(entry)
 }
 
+async function handleTabContextAction(action: string): Promise<void> {
+  const path = tabContextMenu.path
+  closeContextMenu()
+  if (!path) return
+
+  const paths = getTabPathsForAction(path, action)
+  if (paths.length === 0) return
+
+  const closed = await closeTabPaths(paths)
+  if (closed) await persistConfig()
+}
+
+function getTabPathsForAction(path: string, action: string): string[] {
+  const paths = editorState.tabs.map((tab) => tab.path)
+  const index = paths.findIndex((item) => item === path)
+  if (index < 0) return []
+
+  if (action === 'tab-close') return [path]
+  if (action === 'tab-close-others') return paths.filter((item) => item !== path)
+  if (action === 'tab-close-left') return paths.slice(0, index)
+  if (action === 'tab-close-right') return paths.slice(index + 1)
+  if (action === 'tab-close-all') return paths
+  return []
+}
+
+async function closeTabPaths(paths: string[]): Promise<boolean> {
+  for (const path of paths) {
+    const closed = await closeTab(path, requestUnsavedChoice)
+    if (!closed) return false
+  }
+
+  return true
+}
+
 async function openDefaultApp(path: string): Promise<void> {
   const result = await nativeApi.file.openWithDefaultApp(path)
-  showNotice(result.ok ? '已交给系统默认应用打开。' : result.error)
+  if (!result.ok) showNotice(result.error)
 }
 
 async function revealPath(path: string): Promise<void> {
@@ -425,6 +532,17 @@ async function copyRelativePath(entry: SelectedEntry): Promise<void> {
 
 async function copyAbsolutePath(entry: SelectedEntry): Promise<void> {
   await copyText(entry.path, '已复制绝对路径。')
+}
+
+async function copyFileName(entry: SelectedEntry): Promise<void> {
+  await copyText(entry.name, '已复制文件名。')
+}
+
+async function setFileClipboard(entry: SelectedEntry, operation: 'copy' | 'cut'): Promise<void> {
+  if (operation === 'cut' && entry.isProjectRoot) return
+
+  const result = await nativeApi.file.setFileClipboard([entry.path], operation)
+  showNotice(result.ok ? (operation === 'cut' ? '已剪切文件。' : '已复制文件。') : result.error)
 }
 
 async function createFileInFolder(entry: SelectedEntry): Promise<void> {
@@ -758,7 +876,7 @@ async function handleBeforeUnload(event: BeforeUnloadEvent): Promise<void> {
   if (confirmed) {
     await persistConfig()
     allowWindowClose.value = true
-    await getCurrentWindow().close()
+    await closeCurrentWindow()
   } else {
     closeInProgress.value = false
   }
@@ -784,7 +902,7 @@ async function handleTauriClose(event: { preventDefault: () => void }): Promise<
   if (confirmed) {
     await persistConfig()
     allowWindowClose.value = true
-    await getCurrentWindow().close()
+    await closeCurrentWindow()
   } else {
     closeInProgress.value = false
   }
@@ -803,9 +921,11 @@ watch(
 onMounted(async () => {
   const config = await loadProjectConfig()
   await restoreOpenedFiles(projectState.projects, config.openedFiles, config.activeFilePath)
-  removeCloseListener = await getCurrentWindow().onCloseRequested((event) => {
-    void handleTauriClose(event)
-  })
+  if (hasTauriRuntime()) {
+    removeCloseListener = await getCurrentWindow().onCloseRequested((event) => {
+      void handleTauriClose(event)
+    })
+  }
   window.addEventListener('keydown', handleRendererKeydown)
   window.addEventListener('beforeunload', handleBeforeUnload)
 })

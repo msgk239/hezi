@@ -1,6 +1,6 @@
 import { computed, reactive } from 'vue'
 import type { EditorTab, OpenedFileRef, ProjectItem, UnsavedChoice } from '@/types'
-import { getLanguageFromPath, isSupportedTextFile } from '@/utils/fileType'
+import { getLanguageFromPath, getMediaMimeType, getSupportedFileKind } from '@/utils/fileType'
 import { nativeApi } from '@/utils/nativeApi'
 import { baseName, isSameOrChildPath, replacePathPrefix } from '@/utils/path'
 
@@ -16,7 +16,7 @@ export const activeTab = computed(() =>
 )
 
 export function isTabDirty(tab: EditorTab): boolean {
-  return tab.content !== tab.savedContent
+  return tab.kind === 'text' && tab.content !== tab.savedContent
 }
 
 export function findTab(path: string): EditorTab | undefined {
@@ -31,23 +31,33 @@ export function getOpenedFileRefs(): OpenedFileRef[] {
 }
 
 export async function openFile(project: ProjectItem, filePath: string): Promise<boolean> {
+  editorState.notice = ''
+
   const existing = findTab(filePath)
   if (existing) {
     editorState.activePath = existing.path
     return true
   }
 
-  if (!isSupportedTextFile(filePath)) {
-    editorState.binaryNoticePath = filePath
-    editorState.activePath = ''
-    editorState.notice = '该文件不是文本文件，无法直接编辑。可以使用默认应用打开。'
-    return false
-  }
+  const fileKind = getSupportedFileKind(filePath)
 
-  const result = await nativeApi.file.readFile(filePath)
-  if (!result.ok) {
-    editorState.notice = result.error
-    return false
+  let content = ''
+  let mediaSrc: string | undefined
+  if (fileKind === 'text') {
+    const result = await nativeApi.file.readFile(filePath)
+    if (!result.ok) {
+      editorState.binaryNoticePath = filePath
+      editorState.activePath = ''
+      return false
+    }
+    content = result.data
+  } else {
+    const result = await nativeApi.file.readMediaFile(filePath)
+    if (!result.ok) {
+      editorState.notice = result.error
+      return false
+    }
+    mediaSrc = `data:${getMediaMimeType(filePath)};base64,${result.data}`
   }
 
   const tab: EditorTab = {
@@ -55,15 +65,16 @@ export async function openFile(project: ProjectItem, filePath: string): Promise<
     projectId: project.id,
     projectRoot: project.path,
     name: baseName(filePath),
-    language: getLanguageFromPath(filePath),
-    content: result.data,
-    savedContent: result.data
+    kind: fileKind,
+    language: fileKind === 'text' ? getLanguageFromPath(filePath) : '',
+    content,
+    savedContent: content,
+    mediaSrc
   }
 
   editorState.tabs.push(tab)
   editorState.activePath = tab.path
   editorState.binaryNoticePath = ''
-  editorState.notice = `已打开：${tab.name}`
   return true
 }
 
@@ -91,11 +102,16 @@ export function setActiveTab(path: string): void {
 
 export function updateActiveContent(content: string): void {
   const tab = activeTab.value
-  if (!tab) return
+  if (!tab || tab.kind !== 'text') return
   tab.content = content
 }
 
 export async function saveTab(tab: EditorTab): Promise<boolean> {
+  if (tab.kind !== 'text') {
+    editorState.notice = '当前文件是预览文件，无需保存。'
+    return false
+  }
+
   const result = await nativeApi.file.writeFile(tab.path, tab.content)
   if (!result.ok) {
     editorState.notice = result.error
@@ -110,6 +126,11 @@ export async function saveTab(tab: EditorTab): Promise<boolean> {
 export async function saveActiveTab(): Promise<boolean> {
   if (!activeTab.value) {
     editorState.notice = '当前没有打开的文件。'
+    return false
+  }
+
+  if (activeTab.value.kind !== 'text') {
+    editorState.notice = '当前文件是预览文件，无需保存。'
     return false
   }
 
@@ -188,7 +209,14 @@ export function updateTabsForRenamedPath(oldPath: string, newPath: string): void
 
     tab.path = replacePathPrefix(tab.path, oldPath, newPath)
     tab.name = baseName(tab.path)
-    tab.language = getLanguageFromPath(tab.path)
+    tab.kind = getSupportedFileKind(tab.path)
+    tab.language = tab.kind === 'text' ? getLanguageFromPath(tab.path) : ''
+    if (tab.kind === 'text') {
+      tab.mediaSrc = undefined
+    } else {
+      tab.content = ''
+      tab.savedContent = ''
+    }
     if (editorState.activePath && isSameOrChildPath(oldPath, editorState.activePath)) {
       editorState.activePath = replacePathPrefix(editorState.activePath, oldPath, newPath)
     }

@@ -5,17 +5,17 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { indentWithTab } from '@codemirror/commands'
-import { css } from '@codemirror/lang-css'
-import { html } from '@codemirror/lang-html'
-import { javascript } from '@codemirror/lang-javascript'
-import { json } from '@codemirror/lang-json'
-import { markdown } from '@codemirror/lang-markdown'
-import { python } from '@codemirror/lang-python'
-import { sql } from '@codemirror/lang-sql'
-import { xml } from '@codemirror/lang-xml'
-import { yaml } from '@codemirror/lang-yaml'
-import { EditorState, type Extension } from '@codemirror/state'
+import {
+  HighlightStyle,
+  LanguageDescription,
+  StreamLanguage,
+  syntaxHighlighting,
+  type StringStream
+} from '@codemirror/language'
+import { languages } from '@codemirror/language-data'
+import { Compartment, EditorState, type Extension } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
+import { tags } from '@lezer/highlight'
 import { basicSetup } from 'codemirror'
 
 const props = defineProps<{
@@ -33,19 +33,115 @@ const emit = defineEmits<{
 const containerRef = ref<HTMLDivElement | null>(null)
 let editor: EditorView | null = null
 let applyingExternalValue = false
+let languageLoadToken = 0
 
-function languageExtension(language: string): Extension[] {
-  if (language === 'json') return [json()]
-  if (language === 'javascript') return [javascript({ jsx: true })]
-  if (language === 'typescript') return [javascript({ typescript: true, jsx: true })]
-  if (language === 'html') return [html()]
-  if (language === 'css' || language === 'scss' || language === 'less') return [css()]
-  if (language === 'markdown') return [markdown()]
-  if (language === 'python') return [python()]
-  if (language === 'yaml') return [yaml()]
-  if (language === 'xml') return [xml()]
-  if (language === 'sql') return [sql()]
-  return []
+const languageCompartment = new Compartment()
+
+interface ConfigLanguageState {
+  inValue: boolean
+}
+
+const configLanguage = StreamLanguage.define<ConfigLanguageState>({
+  name: 'project-box-config',
+  startState: () => ({ inValue: false }),
+  token(stream: StringStream, state: ConfigLanguageState): string | null {
+    if (stream.sol()) state.inValue = false
+    if (stream.eatSpace()) return null
+
+    const next = stream.peek()
+
+    if (next === '#') {
+      stream.skipToEnd()
+      return 'comment'
+    }
+
+    if (!state.inValue && next === '[') {
+      stream.next()
+      while (!stream.eol() && stream.peek() !== ']') stream.next()
+      if (stream.peek() === ']') stream.next()
+      return 'tag'
+    }
+
+    if (!state.inValue && stream.match(/export\b/)) return 'keyword'
+
+    if (!state.inValue && stream.match(/[A-Za-z0-9_.-]+(?=\s*[:=])/)) {
+      return 'propertyName'
+    }
+
+    if (next === '=' || next === ':') {
+      stream.next()
+      state.inValue = true
+      return 'operator'
+    }
+
+    if (next === '"' || next === "'") {
+      const quote = stream.next()
+      let escaped = false
+      while (!stream.eol()) {
+        const char = stream.next()
+        if (char === quote && !escaped) break
+        escaped = char === '\\' && !escaped
+      }
+      return 'string'
+    }
+
+    if (state.inValue && stream.match(/\b(true|false|null|yes|no|on|off)\b/i)) return 'atom'
+    if (state.inValue && stream.match(/[-+]?(?:\d+\.\d+|\d+)/)) return 'number'
+
+    stream.next()
+    return null
+  }
+})
+
+const editorHighlightStyle = HighlightStyle.define([
+  { tag: tags.comment, color: '#64748b', fontStyle: 'italic' },
+  { tag: tags.keyword, color: '#7c3aed', fontWeight: '600' },
+  { tag: tags.string, color: '#047857' },
+  { tag: tags.number, color: '#b45309' },
+  { tag: tags.bool, color: '#b45309' },
+  { tag: tags.atom, color: '#b45309' },
+  { tag: tags.variableName, color: '#0f172a' },
+  { tag: tags.definition(tags.variableName), color: '#1d4ed8', fontWeight: '600' },
+  { tag: [tags.function(tags.variableName), tags.function(tags.propertyName)], color: '#2563eb' },
+  { tag: [tags.className, tags.typeName], color: '#0e7490', fontWeight: '600' },
+  { tag: tags.propertyName, color: '#1d4ed8' },
+  { tag: tags.tagName, color: '#0e7490', fontWeight: '600' },
+  { tag: tags.operator, color: '#dc2626', fontWeight: '600' },
+  { tag: tags.invalid, color: '#dc2626' }
+])
+
+function fileNameFromPath(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() || path
+}
+
+function isConfigLanguage(language: string): boolean {
+  return ['dotenv', 'properties', 'toml', 'ignore', 'plaintext-config'].includes(language)
+}
+
+async function loadLanguageExtension(filePath: string, language: string): Promise<Extension> {
+  if (isConfigLanguage(language)) return configLanguage
+
+  const description = LanguageDescription.matchFilename(languages, fileNameFromPath(filePath))
+  if (!description) return []
+
+  try {
+    return await description.load()
+  } catch {
+    return []
+  }
+}
+
+async function applyLanguageExtension(): Promise<void> {
+  const view = editor
+  if (!view) return
+
+  const token = ++languageLoadToken
+  const extension = await loadLanguageExtension(props.filePath, props.language)
+  if (token !== languageLoadToken || editor !== view) return
+
+  view.dispatch({
+    effects: languageCompartment.reconfigure(extension)
+  })
 }
 
 function buildExtensions(): Extension[] {
@@ -62,6 +158,7 @@ function buildExtensions(): Extension[] {
       indentWithTab
     ]),
     basicSetup,
+    syntaxHighlighting(editorHighlightStyle),
     EditorView.lineWrapping,
     EditorView.updateListener.of((update) => {
       if (!update.docChanged || applyingExternalValue) return
@@ -89,7 +186,7 @@ function buildExtensions(): Extension[] {
         backgroundColor: '#eaf1ff'
       }
     }),
-    ...languageExtension(props.language)
+    languageCompartment.of([])
   ]
 }
 
@@ -104,6 +201,7 @@ function rebuildEditor(): void {
   if (!editor) return
   const content = editor.state.doc.toString()
   editor.setState(createState(content))
+  void applyLanguageExtension()
 }
 
 onMounted(() => {
@@ -112,6 +210,7 @@ onMounted(() => {
     state: createState(props.modelValue),
     parent: containerRef.value
   })
+  void applyLanguageExtension()
 })
 
 watch(
@@ -131,7 +230,7 @@ watch(
 )
 
 watch(
-  () => [props.language, props.fontSize, props.filePath],
+  () => [props.fontSize, props.filePath, props.language],
   () => rebuildEditor()
 )
 

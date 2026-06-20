@@ -16,6 +16,7 @@ export interface NativeApi {
   file: {
     readDir(dirPath: string): Promise<ApiResult<DirectoryEntry[]>>
     readFile(filePath: string): Promise<ApiResult<string>>
+    readMediaFile(filePath: string): Promise<ApiResult<string>>
     writeFile(filePath: string, content: string): Promise<ApiResult<void>>
     createFile(filePath: string): Promise<ApiResult<void>>
     createFolder(folderPath: string): Promise<ApiResult<void>>
@@ -24,6 +25,7 @@ export interface NativeApi {
     openWithDefaultApp(path: string): Promise<ApiResult<void>>
     revealInExplorer(path: string): Promise<ApiResult<void>>
     copyToClipboard(text: string): Promise<ApiResult<void>>
+    setFileClipboard(paths: string[], operation: 'copy' | 'cut'): Promise<ApiResult<void>>
     pathRelative(rootPath: string, targetPath: string): Promise<ApiResult<string>>
     getPathInfo(path: string): Promise<ApiResult<PathInfo>>
   }
@@ -62,6 +64,8 @@ export const nativeApi: NativeApi = {
   file: {
     readDir: (dirPath) => testApi()?.file.readDir(dirPath) ?? call<DirectoryEntry[]>('read_dir', { dirPath }),
     readFile: (filePath) => testApi()?.file.readFile(filePath) ?? call<string>('read_file', { filePath }),
+    readMediaFile: (filePath) =>
+      testApi()?.file.readMediaFile(filePath) ?? call<string>('read_media_file', { filePath }),
     writeFile: (filePath, content) =>
       testApi()?.file.writeFile(filePath, content) ?? call<void>('write_file', { filePath, content }),
     createFile: (filePath) => testApi()?.file.createFile(filePath) ?? call<void>('create_file', { filePath }),
@@ -76,6 +80,9 @@ export const nativeApi: NativeApi = {
       testApi()?.file.revealInExplorer(path) ?? call<void>('reveal_in_explorer', { path }),
     copyToClipboard: (text) =>
       testApi()?.file.copyToClipboard(text) ?? call<void>('copy_to_clipboard', { text }),
+    setFileClipboard: (paths, operation) =>
+      testApi()?.file.setFileClipboard(paths, operation) ??
+      call<void>('set_file_clipboard', { paths, operation }),
     pathRelative: (rootPath, targetPath) =>
       testApi()?.file.pathRelative(rootPath, targetPath) ??
       call<string>('path_relative', { rootPath, targetPath }),

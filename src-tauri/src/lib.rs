@@ -1,4 +1,5 @@
 use arboard::Clipboard;
+use base64::{engine::general_purpose, Engine as _};
 use pathdiff::diff_paths;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering as CmpOrdering;
@@ -80,6 +81,8 @@ struct PathInfo {
 }
 
 const CONFIG_FILE_NAME: &str = "project-box-config.json";
+const MAX_TEXT_EDIT_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_MEDIA_PREVIEW_BYTES: u64 = 100 * 1024 * 1024;
 const IGNORED_DIRS: &[&str] = &[
     "node_modules",
     ".git",
@@ -239,7 +242,46 @@ fn read_dir(dir_path: String) -> Result<Vec<DirectoryEntry>, String> {
 
 #[tauri::command]
 fn read_file(file_path: String) -> Result<String, String> {
-    fs::read_to_string(file_path).map_err(|error| err("读取文件", error))
+    let metadata = fs::metadata(&file_path).map_err(|error| err("读取文件", error))?;
+    if !metadata.is_file() {
+        return Err(err("读取文件", "目标不是文件"));
+    }
+
+    if metadata.len() > MAX_TEXT_EDIT_BYTES {
+        return Err(err(
+            "读取文件",
+            format!("文件超过 {} MB，请使用默认应用打开", MAX_TEXT_EDIT_BYTES / 1024 / 1024),
+        ));
+    }
+
+    let mut bytes = fs::read(file_path).map_err(|error| err("读取文件", error))?;
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        bytes.drain(..3);
+    }
+
+    if bytes.contains(&0) {
+        return Err(err("读取文件", "文件看起来不是文本文件"));
+    }
+
+    String::from_utf8(bytes).map_err(|_| err("读取文件", "文件不是 UTF-8 文本"))
+}
+
+#[tauri::command]
+fn read_media_file(file_path: String) -> Result<String, String> {
+    let metadata = fs::metadata(&file_path).map_err(|error| err("读取媒体文件", error))?;
+    if !metadata.is_file() {
+        return Err(err("读取媒体文件", "目标不是文件"));
+    }
+
+    if metadata.len() > MAX_MEDIA_PREVIEW_BYTES {
+        return Err(err(
+            "读取媒体文件",
+            format!("文件超过 {} MB，请使用默认应用打开", MAX_MEDIA_PREVIEW_BYTES / 1024 / 1024),
+        ));
+    }
+
+    let bytes = fs::read(file_path).map_err(|error| err("读取媒体文件", error))?;
+    Ok(general_purpose::STANDARD.encode(bytes))
 }
 
 #[tauri::command]
@@ -313,6 +355,163 @@ fn copy_to_clipboard(text: String) -> Result<(), String> {
     clipboard
         .set_text(text)
         .map_err(|error| err("复制到剪贴板", error))
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsClipboardGuard;
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsClipboardGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::System::DataExchange::CloseClipboard();
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_clipboard_paths(paths: Vec<String>) -> Result<Vec<String>, String> {
+    if paths.is_empty() {
+        return Err(err("复制文件", "没有可复制的路径"));
+    }
+
+    let current_dir = std::env::current_dir().map_err(|error| err("读取当前目录", error))?;
+    paths
+        .into_iter()
+        .map(|path| {
+            let path = PathBuf::from(path);
+            let path = if path.is_absolute() {
+                path
+            } else {
+                current_dir.join(path)
+            };
+
+            if !path.exists() {
+                return Err(err("复制文件", format!("路径不存在：{}", path_to_string(path))));
+            }
+
+            Ok(path_to_string(path))
+        })
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn create_hglobal_from_bytes(bytes: &[u8]) -> Result<windows::Win32::Foundation::HGLOBAL, String> {
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+
+    let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len()) }
+        .map_err(|error| err("分配剪贴板内存", error))?;
+    let ptr = unsafe { GlobalLock(handle) } as *mut u8;
+    if ptr.is_null() {
+        return Err(err("锁定剪贴板内存", "GlobalLock 返回空指针"));
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+        let _ = GlobalUnlock(handle);
+    }
+
+    Ok(handle)
+}
+
+#[cfg(target_os = "windows")]
+fn create_hdrop_handle(paths: &[String]) -> Result<windows::Win32::Foundation::HGLOBAL, String> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::Shell::DROPFILES;
+
+    let encoded_paths = paths
+        .iter()
+        .map(|path| path.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>())
+        .collect::<Vec<_>>();
+    let path_unit_count = encoded_paths.iter().map(Vec::len).sum::<usize>() + 1;
+    let dropfiles_size = std::mem::size_of::<DROPFILES>();
+    let total_size = dropfiles_size + path_unit_count * std::mem::size_of::<u16>();
+    let mut bytes = vec![0_u8; total_size];
+
+    unsafe {
+        let dropfiles = DROPFILES {
+            pFiles: dropfiles_size as u32,
+            pt: POINT { x: 0, y: 0 },
+            fNC: false.into(),
+            fWide: true.into(),
+        };
+        std::ptr::write(bytes.as_mut_ptr() as *mut DROPFILES, dropfiles);
+
+        let mut cursor = bytes.as_mut_ptr().add(dropfiles_size) as *mut u16;
+        for path in encoded_paths {
+            std::ptr::copy_nonoverlapping(path.as_ptr(), cursor, path.len());
+            cursor = cursor.add(path.len());
+        }
+        cursor.write(0);
+    }
+
+    create_hglobal_from_bytes(&bytes)
+}
+
+#[cfg(target_os = "windows")]
+fn create_drop_effect_handle(cut: bool) -> Result<windows::Win32::Foundation::HGLOBAL, String> {
+    use windows::Win32::System::Ole::{DROPEFFECT_COPY, DROPEFFECT_MOVE};
+
+    let effect = if cut {
+        DROPEFFECT_MOVE.0
+    } else {
+        DROPEFFECT_COPY.0
+    };
+
+    create_hglobal_from_bytes(&effect.to_le_bytes())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn set_file_clipboard(paths: Vec<String>, operation: String) -> Result<(), String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::DataExchange::{
+        EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+    };
+    use windows::Win32::System::Ole::CF_HDROP;
+
+    let cut = match operation.as_str() {
+        "copy" => false,
+        "cut" => true,
+        _ => return Err(err("复制文件", "未知剪贴板操作")),
+    };
+
+    let paths = normalize_clipboard_paths(paths)?;
+    let hdrop_handle = create_hdrop_handle(&paths)?;
+    let drop_effect_handle = create_drop_effect_handle(cut)?;
+    let preferred_drop_effect = "Preferred DropEffect"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<u16>>();
+
+    unsafe {
+        OpenClipboard(None).map_err(|error| err("打开剪贴板", error))?;
+    }
+    let _clipboard_guard = WindowsClipboardGuard;
+
+    unsafe {
+        EmptyClipboard().map_err(|error| err("清空剪贴板", error))?;
+        SetClipboardData(CF_HDROP.0 as u32, Some(HANDLE(hdrop_handle.0)))
+            .map_err(|error| err("复制文件到剪贴板", error))?;
+
+        let drop_effect_format =
+            RegisterClipboardFormatW(PCWSTR(preferred_drop_effect.as_ptr()));
+        if drop_effect_format == 0 {
+            return Err(err("注册剪贴板格式", "Preferred DropEffect 注册失败"));
+        }
+
+        SetClipboardData(drop_effect_format, Some(HANDLE(drop_effect_handle.0)))
+            .map_err(|error| err("设置剪贴板操作类型", error))?;
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn set_file_clipboard(_paths: Vec<String>, _operation: String) -> Result<(), String> {
+    Err(err("复制文件", "当前系统暂不支持复制或剪切文件到剪贴板"))
 }
 
 #[tauri::command]
@@ -534,6 +733,7 @@ pub fn run() {
             select_project_folder,
             read_dir,
             read_file,
+            read_media_file,
             write_file,
             create_file,
             create_folder,
@@ -542,6 +742,7 @@ pub fn run() {
             open_with_default_app,
             reveal_in_explorer,
             copy_to_clipboard,
+            set_file_clipboard,
             path_relative,
             get_path_info
         ])

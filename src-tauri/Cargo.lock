@@ -2794,9 +2794,10 @@ dependencies = [
 
 [[package]]
 name = "project-box"
-version = "0.1.9"
+version = "0.1.14"
 dependencies = [
  "arboard",
+ "base64 0.22.1",
  "dirs",
  "open",
  "pathdiff",
