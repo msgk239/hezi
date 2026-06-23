@@ -14,6 +14,8 @@ export interface OpenedFileRef {
 export interface AppSettings {
   fontSize: number
   sidebarWidth: number
+  fileSortMode: FileSortMode
+  folderSortModes: Record<string, FileSortMode>
 }
 
 export interface AppConfig {
@@ -31,6 +33,7 @@ export interface DirectoryEntry {
   path: string
   type: FileEntryType
   size?: number
+  createdAt?: number
   modifiedAt?: number
 }
 
@@ -60,6 +63,9 @@ export interface TreeNode {
   projectId: string
   projectRoot: string
   isProjectRoot?: boolean
+  size?: number
+  createdAt?: number
+  modifiedAt?: number
   expanded?: boolean
   loaded?: boolean
   loading?: boolean
@@ -107,3 +113,7 @@ export type ShortcutAction =
   | 'rename-selected'
   | 'delete-selected'
   | 'copy-selected-absolute-path'
+
+export type FileSortMode = 'name-asc' | 'modified-desc' | 'modified-asc'
+
+export type FolderSortModeChoice = FileSortMode | 'global'

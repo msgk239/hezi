@@ -26,12 +26,13 @@
         空文件夹
       </div>
       <FileTree
-        v-for="child in node.children"
+        v-for="child in sortedChildren"
         :key="child.path"
         :node="child"
         :level="level + 1"
         :selected-path="selectedPath"
         :refresh-key="refreshKey"
+        :get-sort-mode="getSortMode"
         @open-file="$emit('open-file', $event)"
         @select-entry="$emit('select-entry', $event)"
         @context-menu="$emit('context-menu', $event)"
@@ -42,9 +43,10 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, watch } from 'vue'
-import type { SelectedEntry, TreeNode } from '@/types'
+import { computed, onMounted, watch } from 'vue'
+import type { FileSortMode, SelectedEntry, TreeNode } from '@/types'
 import { shouldDirectoryStartExpanded } from '@/stores/projectStore'
+import { sortFileEntries } from '@/utils/fileSort'
 import { nativeApi } from '@/utils/nativeApi'
 
 const props = defineProps<{
@@ -52,6 +54,7 @@ const props = defineProps<{
   level: number
   selectedPath: string
   refreshKey: number
+  getSortMode: (path: string) => FileSortMode
 }>()
 
 const emit = defineEmits<{
@@ -60,6 +63,8 @@ const emit = defineEmits<{
   'context-menu': [payload: { entry: SelectedEntry; x: number; y: number }]
   'expanded-change': [payload: { path: string; expanded: boolean }]
 }>()
+
+const sortedChildren = computed(() => sortFileEntries(props.node.children ?? [], props.getSortMode(props.node.path)))
 
 function toSelectedEntry(): SelectedEntry {
   return {

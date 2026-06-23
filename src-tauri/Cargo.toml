@@ -1,6 +1,6 @@
 [package]
 name = "project-box"
-version = "0.1.14"
+version = "0.1.16"
 description = "项目盒子 - 本地多项目文件管理与编辑工具"
 authors = ["Project Box"]
 edition = "2021"

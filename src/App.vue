@@ -25,12 +25,17 @@
       <ProjectSidebar
         :projects="projectState.projects"
         :selected-path="selectedPath"
+        :selected-entry="projectState.selectedEntry"
         :width="projectState.settings.sidebarWidth"
         :refresh-key="treeRefreshKey"
+        :sort-mode="projectState.settings.fileSortMode"
+        :folder-sort-modes="projectState.settings.folderSortModes"
         @open-file="handleOpenFile"
         @select-entry="setSelectedEntry"
         @context-menu="openContextMenu"
         @expanded-change="handleTreeExpandedChange"
+        @sort-mode-change="handleSortModeChange"
+        @folder-sort-mode-change="handleFolderSortModeChange"
       />
 
       <div class="sidebar-resizer" title="拖动调整左侧宽度" @mousedown="startSidebarResize" />
@@ -201,6 +206,7 @@ import ProjectSidebar from '@/components/ProjectSidebar.vue'
 import {
   addProjectFromDialog,
   buildConfig,
+  getFolderSortOverride,
   loadProjectConfig,
   projectState,
   removeExpandedPathsUnder,
@@ -208,6 +214,7 @@ import {
   replaceExpandedPathPrefix,
   renameProject,
   setSelectedEntry,
+  setFolderSortMode,
   setPathExpanded,
   updateSettings
 } from '@/stores/projectStore'
@@ -228,7 +235,16 @@ import {
   setActiveTab,
   updateTabsForRenamedPath
 } from '@/stores/editorStore'
-import type { ContextMenuItem, EditorTab, ProjectItem, SelectedEntry, ShortcutAction, UnsavedChoice } from '@/types'
+import type {
+  ContextMenuItem,
+  EditorTab,
+  FileSortMode,
+  FolderSortModeChoice,
+  ProjectItem,
+  SelectedEntry,
+  ShortcutAction,
+  UnsavedChoice
+} from '@/types'
 import { isSupportedTextFile } from '@/utils/fileType'
 import { nativeApi } from '@/utils/nativeApi'
 import { baseName, isUnsafeRelativeInput, joinPath, replaceBaseName } from '@/utils/path'
@@ -318,6 +334,17 @@ async function handleTreeExpandedChange(payload: { path: string; expanded: boole
   await persistConfig()
 }
 
+async function handleSortModeChange(fileSortMode: FileSortMode): Promise<void> {
+  updateSettings({ fileSortMode })
+  await persistConfig()
+}
+
+async function handleFolderSortModeChange(payload: { path: string; mode: FolderSortModeChoice }): Promise<void> {
+  setFolderSortMode(payload.path, payload.mode === 'global' ? null : payload.mode)
+  treeRefreshKey.value += 1
+  await persistConfig()
+}
+
 async function handleAddProject(): Promise<void> {
   const project = await addProjectFromDialog()
   if (project) {
@@ -375,20 +402,20 @@ async function handleCloseTab(path: string): Promise<void> {
 
 function openContextMenu(payload: { entry: SelectedEntry; x: number; y: number }): void {
   tabContextMenu.visible = false
-  contextMenu.visible = true
-  contextMenu.x = Math.min(payload.x, window.innerWidth - 220)
-  contextMenu.y = Math.min(payload.y, window.innerHeight - 320)
   contextMenu.entry = payload.entry
   contextMenu.items = buildContextItems(payload.entry)
+  contextMenu.x = payload.x
+  contextMenu.y = payload.y
+  contextMenu.visible = true
 }
 
 function openTabContextMenu(payload: { path: string; x: number; y: number }): void {
   contextMenu.visible = false
-  tabContextMenu.visible = true
-  tabContextMenu.x = Math.min(payload.x, window.innerWidth - 220)
-  tabContextMenu.y = Math.min(payload.y, window.innerHeight - 240)
   tabContextMenu.path = payload.path
   tabContextMenu.items = buildTabContextItems(payload.path)
+  tabContextMenu.x = payload.x
+  tabContextMenu.y = payload.y
+  tabContextMenu.visible = true
 }
 
 function closeContextMenu(): void {
@@ -427,6 +454,11 @@ function buildContextItems(entry: SelectedEntry): ContextMenuItem[] {
     ]
   }
 
+  const folderSortOverride = getFolderSortOverride(entry.path)
+  const currentSort = folderSortOverride || 'global'
+  const sortLabel = (mode: FolderSortModeChoice, label: string) =>
+    currentSort === mode ? `${label}（当前）` : label
+
   const folderItems: ContextMenuItem[] = [
     { id: 'new-file', label: '新建文件' },
     { id: 'new-folder', label: '新建文件夹' },
@@ -438,6 +470,11 @@ function buildContextItems(entry: SelectedEntry): ContextMenuItem[] {
     { id: 'copy-absolute', label: '复制绝对路径' },
     { id: 'copy-file', label: '复制文件' },
     { id: 'cut-file', label: '剪切文件', disabled: entry.isProjectRoot },
+    { id: 'separator-folder-sort', label: '', separator: true },
+    { id: 'sort-global', label: sortLabel('global', '排序跟随全局') },
+    { id: 'sort-name-asc', label: sortLabel('name-asc', '本文件夹按名称') },
+    { id: 'sort-modified-desc', label: sortLabel('modified-desc', '本文件夹按最新时间') },
+    { id: 'sort-modified-asc', label: sortLabel('modified-asc', '本文件夹按最早时间') },
     { id: 'separator-folder-edit', label: '', separator: true },
     { id: 'rename', label: '重命名' }
   ]
@@ -466,9 +503,29 @@ async function handleContextAction(action: string): Promise<void> {
   if (action === 'cut-file') await setFileClipboard(entry, 'cut')
   if (action === 'new-file') await createFileInFolder(entry)
   if (action === 'new-folder') await createFolderInFolder(entry)
+  if (action.startsWith('sort-')) await setFolderSortFromContext(entry, action)
   if (action === 'rename') await renameEntry(entry)
   if (action === 'delete') await deleteEntry(entry)
   if (action === 'project-remove') await removeProjectFromList(entry)
+}
+
+async function setFolderSortFromContext(entry: SelectedEntry, action: string): Promise<void> {
+  if (entry.type !== 'directory') return
+
+  const modeByAction: Record<string, FolderSortModeChoice> = {
+    'sort-global': 'global',
+    'sort-name-asc': 'name-asc',
+    'sort-modified-desc': 'modified-desc',
+    'sort-modified-asc': 'modified-asc'
+  }
+  const mode = modeByAction[action]
+  if (!mode) return
+
+  await handleFolderSortModeChange({
+    path: entry.path,
+    mode
+  })
+  showNotice(mode === 'global' ? '本文件夹已跟随全局排序。' : '本文件夹排序已更新。')
 }
 
 async function handleTabContextAction(action: string): Promise<void> {

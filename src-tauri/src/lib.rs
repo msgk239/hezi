@@ -3,7 +3,6 @@ use base64::{engine::general_purpose, Engine as _};
 use pathdiff::diff_paths;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering as CmpOrdering;
-#[cfg(target_os = "windows")]
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -33,6 +32,10 @@ struct OpenedFileRef {
 struct AppSettings {
     font_size: u32,
     sidebar_width: u32,
+    #[serde(default = "default_file_sort_mode")]
+    file_sort_mode: String,
+    #[serde(default)]
+    folder_sort_modes: HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -64,6 +67,7 @@ struct DirectoryEntry {
     #[serde(rename = "type")]
     entry_type: String,
     size: Option<u64>,
+    created_at: Option<u128>,
     modified_at: Option<u128>,
 }
 
@@ -106,6 +110,8 @@ fn default_config() -> AppConfig {
         settings: AppSettings {
             font_size: 14,
             sidebar_width: 280,
+            file_sort_mode: default_file_sort_mode(),
+            folder_sort_modes: HashMap::new(),
         },
     }
 }
@@ -132,6 +138,18 @@ fn modified_at_ms(metadata: &fs::Metadata) -> Option<u128> {
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_millis())
+}
+
+fn created_at_ms(metadata: &fs::Metadata) -> Option<u128> {
+    metadata
+        .created()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis())
+}
+
+fn default_file_sort_mode() -> String {
+    "name-asc".to_string()
 }
 
 fn config_dir() -> Result<PathBuf, String> {
@@ -225,6 +243,7 @@ fn read_dir(dir_path: String) -> Result<Vec<DirectoryEntry>, String> {
             path: path_to_string(&path),
             entry_type: if is_dir { "directory" } else { "file" }.to_string(),
             size: Some(metadata.len()),
+            created_at: created_at_ms(&metadata),
             modified_at: modified_at_ms(&metadata),
         });
     }
@@ -250,7 +269,10 @@ fn read_file(file_path: String) -> Result<String, String> {
     if metadata.len() > MAX_TEXT_EDIT_BYTES {
         return Err(err(
             "读取文件",
-            format!("文件超过 {} MB，请使用默认应用打开", MAX_TEXT_EDIT_BYTES / 1024 / 1024),
+            format!(
+                "文件超过 {} MB，请使用默认应用打开",
+                MAX_TEXT_EDIT_BYTES / 1024 / 1024
+            ),
         ));
     }
 
@@ -276,7 +298,10 @@ fn read_media_file(file_path: String) -> Result<String, String> {
     if metadata.len() > MAX_MEDIA_PREVIEW_BYTES {
         return Err(err(
             "读取媒体文件",
-            format!("文件超过 {} MB，请使用默认应用打开", MAX_MEDIA_PREVIEW_BYTES / 1024 / 1024),
+            format!(
+                "文件超过 {} MB，请使用默认应用打开",
+                MAX_MEDIA_PREVIEW_BYTES / 1024 / 1024
+            ),
         ));
     }
 
@@ -387,7 +412,10 @@ fn normalize_clipboard_paths(paths: Vec<String>) -> Result<Vec<String>, String> 
             };
 
             if !path.exists() {
-                return Err(err("复制文件", format!("路径不存在：{}", path_to_string(path))));
+                return Err(err(
+                    "复制文件",
+                    format!("路径不存在：{}", path_to_string(path)),
+                ));
             }
 
             Ok(path_to_string(path))
@@ -421,7 +449,11 @@ fn create_hdrop_handle(paths: &[String]) -> Result<windows::Win32::Foundation::H
 
     let encoded_paths = paths
         .iter()
-        .map(|path| path.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>())
+        .map(|path| {
+            path.encode_utf16()
+                .chain(std::iter::once(0))
+                .collect::<Vec<u16>>()
+        })
         .collect::<Vec<_>>();
     let path_unit_count = encoded_paths.iter().map(Vec::len).sum::<usize>() + 1;
     let dropfiles_size = std::mem::size_of::<DROPFILES>();
@@ -495,8 +527,7 @@ fn set_file_clipboard(paths: Vec<String>, operation: String) -> Result<(), Strin
         SetClipboardData(CF_HDROP.0 as u32, Some(HANDLE(hdrop_handle.0)))
             .map_err(|error| err("复制文件到剪贴板", error))?;
 
-        let drop_effect_format =
-            RegisterClipboardFormatW(PCWSTR(preferred_drop_effect.as_ptr()));
+        let drop_effect_format = RegisterClipboardFormatW(PCWSTR(preferred_drop_effect.as_ptr()));
         if drop_effect_format == 0 {
             return Err(err("注册剪贴板格式", "Preferred DropEffect 注册失败"));
         }

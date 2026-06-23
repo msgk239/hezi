@@ -1,6 +1,6 @@
 {
   "name": "project-box",
-  "version": "0.1.14",
+  "version": "0.1.16",
   "description": "项目盒子 - 本地多项目文件管理与编辑工具",
   "author": "Project Box",
   "private": true,
@@ -10,7 +10,8 @@
     "web:dev": "vite --host 127.0.0.1",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
-    "dist": "tauri build"
+    "dist": "tauri build",
+    "dist:release": "powershell -ExecutionPolicy Bypass -File scripts/build-release.ps1"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.0",

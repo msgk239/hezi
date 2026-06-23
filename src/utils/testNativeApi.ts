@@ -1,9 +1,13 @@
 import type { NativeApi } from '@/utils/nativeApi'
 import type { ApiResult, AppConfig, DirectoryEntry, FileEntryType, PathInfo } from '@/types'
-import { baseName, extensionName } from '@/utils/path'
+import { baseName, dirName, extensionName } from '@/utils/path'
 
 const projectRoot = 'D:\\qa\\project-box'
 const projectId = 'qa-project'
+const srcDir = `${projectRoot}\\src`
+const docsDir = `${projectRoot}\\docs`
+const directories = new Set([projectRoot, srcDir, docsDir])
+const now = Date.now()
 
 const fileContents: Record<string, string> = {
   [`${projectRoot}\\.env`]: [
@@ -17,7 +21,7 @@ const fileContents: Record<string, string> = {
     '# TOML comment should be highlighted',
     '[project]',
     'name = "project-box"',
-    'version = "0.1.14"'
+    'version = "0.1.16"'
   ].join('\n'),
   [`${projectRoot}\\uv.lock`]: [
     '# uv lock comment should be highlighted',
@@ -27,6 +31,12 @@ const fileContents: Record<string, string> = {
   [`${projectRoot}\\.gitignore`]: ['# ignore comment should be highlighted', 'dist/', 'release-tauri/'].join('\n'),
   [`${projectRoot}\\.gitattributes`]: ['# attributes comment should be highlighted', '* text=auto'].join('\n')
 }
+
+fileContents[`${srcDir}\\feature-search.ts`] = [
+  'export const featureName = "file search"',
+  'export const updatedAt = "2026-06-23"'
+].join('\n')
+fileContents[`${docsDir}\\search-notes.md`] = '# Search notes\n\nQA file for folder-scoped search.'
 
 for (let index = 1; index <= 14; index += 1) {
   const name = `very_long_file_name_for_tab_overflow_check_${String(index).padStart(2, '0')}.md`
@@ -46,14 +56,37 @@ function fileType(path: string): FileEntryType {
   return path in fileContents ? 'file' : 'directory'
 }
 
-function directoryEntries(): DirectoryEntry[] {
-  return Object.keys(fileContents).map((path) => ({
-    name: baseName(path),
-    path,
-    type: 'file',
-    size: fileContents[path].length,
-    modifiedAt: Date.now()
-  }))
+function isDirectChild(parentPath: string, childPath: string): boolean {
+  return dirName(childPath).toLowerCase() === parentPath.toLowerCase()
+}
+
+function directoryEntries(dirPath: string): DirectoryEntry[] {
+  const entries: DirectoryEntry[] = []
+
+  for (const directory of directories) {
+    if (directory === dirPath || !isDirectChild(dirPath, directory)) continue
+    entries.push({
+      name: baseName(directory),
+      path: directory,
+      type: 'directory',
+      size: 0,
+      createdAt: directory === docsDir ? now - 180_000 : now - 60_000,
+      modifiedAt: now - 30_000
+    })
+  }
+
+  for (const path of Object.keys(fileContents)) {
+    if (!isDirectChild(dirPath, path)) continue
+    entries.push({
+      name: baseName(path),
+      path,
+      type: 'file',
+      size: fileContents[path].length,
+      modifiedAt: path.includes('feature-search') ? now : now - 120_000
+    })
+  }
+
+  return entries
 }
 
 function pathRelative(rootPath: string, targetPath: string): string {
@@ -79,7 +112,9 @@ export function installProjectBoxTestNative(): void {
     treeStateInitialized: true,
     settings: {
       fontSize: 14,
-      sidebarWidth: 520
+      sidebarWidth: 520,
+      fileSortMode: 'name-asc',
+      folderSortModes: {}
     }
   }
 
@@ -90,7 +125,7 @@ export function installProjectBoxTestNative(): void {
       selectProjectFolder: async () => ok(null)
     },
     file: {
-      readDir: async () => ok(directoryEntries()),
+      readDir: async (dirPath) => ok(directoryEntries(dirPath)),
       readFile: async (filePath) => ok(fileContents[filePath] ?? ''),
       readMediaFile: async () => ok(''),
       writeFile: async (filePath, content) => {
@@ -121,8 +156,8 @@ export function installProjectBoxTestNative(): void {
           path,
           name: baseName(path),
           extension: extensionName(path),
-          exists: path === projectRoot || path in fileContents,
-          type: path === projectRoot ? 'directory' : fileType(path),
+          exists: directories.has(path) || path in fileContents,
+          type: directories.has(path) ? 'directory' : fileType(path),
           size: fileContents[path]?.length ?? 0,
           modifiedAt: Date.now()
         })

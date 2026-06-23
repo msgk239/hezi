@@ -1,10 +1,28 @@
 import { reactive } from 'vue'
-import type { AppConfig, AppSettings, ProjectItem, SelectedEntry } from '@/types'
+import type { AppConfig, AppSettings, FileSortMode, ProjectItem, SelectedEntry } from '@/types'
 import { nativeApi } from '@/utils/nativeApi'
 
 const DEFAULT_SETTINGS: AppSettings = {
   fontSize: 14,
-  sidebarWidth: 280
+  sidebarWidth: 280,
+  fileSortMode: 'name-asc',
+  folderSortModes: {}
+}
+
+const FILE_SORT_MODES: FileSortMode[] = ['name-asc', 'modified-desc', 'modified-asc']
+
+function normalizeSettings(settings?: Partial<AppSettings>): AppSettings {
+  const sortMode = settings?.fileSortMode
+  const folderSortModes = Object.fromEntries(
+    Object.entries(settings?.folderSortModes ?? {}).filter(([, mode]) => FILE_SORT_MODES.includes(mode))
+  )
+
+  return {
+    ...DEFAULT_SETTINGS,
+    ...settings,
+    fileSortMode: sortMode && FILE_SORT_MODES.includes(sortMode) ? sortMode : DEFAULT_SETTINGS.fileSortMode,
+    folderSortModes
+  }
 }
 
 export const projectState = reactive({
@@ -54,10 +72,7 @@ export async function loadProjectConfig(): Promise<AppConfig> {
   projectState.projects = config.projects
   projectState.expandedPaths = [...config.expandedPaths]
   projectState.treeStateInitialized = config.treeStateInitialized
-  projectState.settings = {
-    ...DEFAULT_SETTINGS,
-    ...config.settings
-  }
+  projectState.settings = normalizeSettings(config.settings)
   projectState.selectedProjectId =
     config.activeProjectId || config.projects[0]?.id || ''
   projectState.loaded = true
@@ -130,11 +145,15 @@ export function setSelectedEntry(entry: SelectedEntry | null): void {
 export function updateSettings(settings: Partial<AppSettings>): void {
   projectState.settings = {
     ...projectState.settings,
-    ...settings
+    ...settings,
+    folderSortModes: {
+      ...projectState.settings.folderSortModes,
+      ...settings.folderSortModes
+    }
   }
 }
 
-function normalizePathKey(path: string): string {
+export function normalizePathKey(path: string): string {
   return path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
 }
 
@@ -168,6 +187,7 @@ export function removeExpandedPathsUnder(rootPath: string): void {
   projectState.expandedPaths = projectState.expandedPaths.filter(
     (expandedPath) => !isSameOrChildPath(expandedPath, rootPath)
   )
+  removeFolderSortModesUnder(rootPath)
 }
 
 export function replaceExpandedPathPrefix(oldRootPath: string, newRootPath: string): void {
@@ -175,4 +195,55 @@ export function replaceExpandedPathPrefix(oldRootPath: string, newRootPath: stri
     if (!isSameOrChildPath(expandedPath, oldRootPath)) return expandedPath
     return `${newRootPath}${expandedPath.slice(oldRootPath.length)}`
   })
+  replaceFolderSortModePathPrefix(oldRootPath, newRootPath)
+}
+
+export function getFolderSortMode(path: string): FileSortMode {
+  return projectState.settings.folderSortModes[normalizePathKey(path)] || projectState.settings.fileSortMode
+}
+
+export function getFolderSortOverride(path: string): FileSortMode | undefined {
+  return projectState.settings.folderSortModes[normalizePathKey(path)]
+}
+
+export function setFolderSortMode(path: string, mode: FileSortMode | null): void {
+  const key = normalizePathKey(path)
+  const folderSortModes = { ...projectState.settings.folderSortModes }
+
+  if (mode) {
+    folderSortModes[key] = mode
+  } else {
+    delete folderSortModes[key]
+  }
+
+  projectState.settings = {
+    ...projectState.settings,
+    folderSortModes
+  }
+}
+
+export function removeFolderSortModesUnder(rootPath: string): void {
+  const folderSortModes = Object.fromEntries(
+    Object.entries(projectState.settings.folderSortModes).filter(([path]) => !isSameOrChildPath(path, rootPath))
+  )
+
+  projectState.settings = {
+    ...projectState.settings,
+    folderSortModes
+  }
+}
+
+export function replaceFolderSortModePathPrefix(oldRootPath: string, newRootPath: string): void {
+  const folderSortModes = Object.fromEntries(
+    Object.entries(projectState.settings.folderSortModes).map(([path, mode]) => {
+      if (!isSameOrChildPath(path, oldRootPath)) return [path, mode]
+      const suffix = path.slice(normalizePathKey(oldRootPath).length)
+      return [normalizePathKey(`${newRootPath}${suffix}`), mode]
+    })
+  )
+
+  projectState.settings = {
+    ...projectState.settings,
+    folderSortModes
+  }
 }
