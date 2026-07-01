@@ -25,6 +25,20 @@
           <path d="m15 15 5 5" />
         </svg>
       </button>
+      <button
+        class="activity-button"
+        :class="{ active: sidebarView === 'jump' }"
+        type="button"
+        title="路径"
+        @click="setSidebarView('jump')"
+      >
+        <svg class="activity-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 12h14" />
+          <path d="m14 8 4 4-4 4" />
+          <path d="M5 5h5" />
+          <path d="M5 19h5" />
+        </svg>
+      </button>
     </nav>
 
     <div class="sidebar-panel">
@@ -108,6 +122,38 @@
         </template>
       </template>
 
+      <template v-else-if="sidebarView === 'jump'">
+        <div class="sidebar-title">路径</div>
+
+        <div v-if="projects.length === 0" class="sidebar-empty">
+          点击顶部“添加项目”开始。
+        </div>
+
+        <template v-else>
+          <div class="sidebar-tools path-jump-tools">
+            <input
+              ref="pathJumpInputRef"
+              v-model="pathJumpValue"
+              class="sidebar-input"
+              type="text"
+              placeholder="D:\project\src\app.ts"
+              @keydown.enter="runPathJump"
+            />
+
+            <div class="sidebar-tool-row">
+              <button class="sidebar-button primary" type="button" :disabled="!canRunPathJump" @click="runPathJump">
+                跳转
+              </button>
+              <button class="sidebar-button" type="button" :disabled="!pathJumpValue" @click="clearPathJump">
+                清除
+              </button>
+            </div>
+
+            <div v-if="pathJumpError" class="sidebar-search-error">{{ pathJumpError }}</div>
+          </div>
+        </template>
+      </template>
+
       <template v-else>
         <div class="sidebar-title sidebar-title-row">
           <span>常用项目</span>
@@ -174,7 +220,7 @@ import type {
 } from '@/types'
 import { shouldDirectoryStartExpanded } from '@/stores/projectStore'
 import { sortFileEntries } from '@/utils/fileSort'
-import { baseName, dirName, normalizeSlashes } from '@/utils/path'
+import { baseName, dirName, isAbsolutePath, isSameOrChildPath, normalizeSlashes } from '@/utils/path'
 import { nativeApi } from '@/utils/nativeApi'
 
 const props = defineProps<{
@@ -194,6 +240,7 @@ const emit = defineEmits<{
   'expanded-change': [payload: { path: string; expanded: boolean }]
   'sort-mode-change': [mode: FileSortMode]
   'folder-sort-mode-change': [payload: { path: string; mode: FolderSortModeChoice }]
+  'jump-to-entry': [entry: SelectedEntry]
 }>()
 
 interface SearchRoot {
@@ -219,7 +266,7 @@ interface SearchContext {
   limitReached: boolean
 }
 
-type SidebarView = 'files' | 'search'
+type SidebarView = 'files' | 'search' | 'jump'
 
 const MAX_SEARCH_RESULTS = 300
 const MAX_SEARCH_DIRECTORIES = 1500
@@ -228,6 +275,7 @@ const MAX_SEARCH_DEPTH = 40
 const rootNodes = ref<TreeNode[]>([])
 const sidebarView = ref<SidebarView>('files')
 const searchInputRef = ref<HTMLInputElement | null>(null)
+const pathJumpInputRef = ref<HTMLInputElement | null>(null)
 const searchQuery = ref('')
 const searchScope = ref('all')
 const searching = ref(false)
@@ -235,6 +283,9 @@ const searchSearched = ref(false)
 const searchResults = ref<SearchResult[]>([])
 const searchError = ref('')
 const searchLimitReached = ref(false)
+const pathJumpValue = ref('')
+const pathJumpError = ref('')
+const pathJumping = ref(false)
 let searchRunId = 0
 
 const maxSearchResults = MAX_SEARCH_RESULTS
@@ -273,13 +324,13 @@ const selectedFolderSortChoice = computed<FolderSortModeChoice>(() => {
 const canRunSearch = computed(() => Boolean(searchQuery.value.trim()) && !searching.value)
 const canClearSearch = computed(() => Boolean(searchQuery.value.trim()) || isSearchMode.value)
 const isSearchMode = computed(() => searchSearched.value || searching.value)
+const canRunPathJump = computed(() => Boolean(cleanPathJumpInput(pathJumpValue.value)) && !pathJumping.value)
 
 async function setSidebarView(view: SidebarView): Promise<void> {
   sidebarView.value = view
-  if (view !== 'search') return
-
   await nextTick()
-  searchInputRef.value?.focus()
+  if (view === 'search') searchInputRef.value?.focus()
+  if (view === 'jump') pathJumpInputRef.value?.focus()
 }
 
 function rebuildRoots(): void {
@@ -309,6 +360,71 @@ function resetSearchState(): void {
 function clearSearch(): void {
   searchQuery.value = ''
   resetSearchState()
+}
+
+function cleanPathJumpInput(input: string): string {
+  let value = input.trim()
+  const quoted =
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+
+  if (quoted) value = value.slice(1, -1).trim()
+  return value
+}
+
+function clearPathJump(): void {
+  pathJumpValue.value = ''
+  pathJumpError.value = ''
+}
+
+function findProjectForPath(path: string): ProjectItem | null {
+  return props.projects.find((project) => isSameOrChildPath(project.path, path)) ?? null
+}
+
+function isProjectRootPath(project: ProjectItem, path: string): boolean {
+  return normalizePathKey(project.path) === normalizePathKey(path)
+}
+
+async function runPathJump(): Promise<void> {
+  const path = cleanPathJumpInput(pathJumpValue.value)
+  if (!path || pathJumping.value) return
+
+  if (!isAbsolutePath(path)) {
+    pathJumpError.value = '请输入绝对路径。'
+    return
+  }
+
+  const project = findProjectForPath(path)
+  if (!project) {
+    pathJumpError.value = '路径不在已添加项目中。'
+    return
+  }
+
+  pathJumping.value = true
+  pathJumpError.value = ''
+  const result = await nativeApi.file.getPathInfo(path)
+  pathJumping.value = false
+
+  if (!result.ok) {
+    pathJumpError.value = result.error
+    return
+  }
+
+  const pathInfo = result.data
+  if (!pathInfo.exists || (pathInfo.type !== 'file' && pathInfo.type !== 'directory')) {
+    pathJumpError.value = '路径不存在。'
+    return
+  }
+
+  emit('jump-to-entry', {
+    name: pathInfo.name || baseName(pathInfo.path),
+    path: pathInfo.path,
+    type: pathInfo.type,
+    projectId: project.id,
+    projectRoot: project.path,
+    isProjectRoot: isProjectRootPath(project, pathInfo.path)
+  })
+  sidebarView.value = 'files'
 }
 
 function handleSortModeChange(event: Event): void {
@@ -518,6 +634,10 @@ watch(
 
 watch(searchQuery, (query) => {
   if (!query.trim()) resetSearchState()
+})
+
+watch(pathJumpValue, () => {
+  pathJumpError.value = ''
 })
 
 watch(

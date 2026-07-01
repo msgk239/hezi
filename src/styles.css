@@ -303,7 +303,8 @@ button {
   background: #eef2f7;
 }
 
-.search-view-tools {
+.search-view-tools,
+.path-jump-tools {
   display: flex;
   flex-direction: column;
   gap: 8px;

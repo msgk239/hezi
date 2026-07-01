@@ -21,7 +21,7 @@ const fileContents: Record<string, string> = {
     '# TOML comment should be highlighted',
     '[project]',
     'name = "project-box"',
-    'version = "0.1.16"'
+    'version = "0.1.17"'
   ].join('\n'),
   [`${projectRoot}\\uv.lock`]: [
     '# uv lock comment should be highlighted',

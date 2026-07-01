@@ -36,6 +36,7 @@
         @expanded-change="handleTreeExpandedChange"
         @sort-mode-change="handleSortModeChange"
         @folder-sort-mode-change="handleFolderSortModeChange"
+        @jump-to-entry="handleJumpToEntry"
       />
 
       <div class="sidebar-resizer" title="拖动调整左侧宽度" @mousedown="startSidebarResize" />
@@ -247,7 +248,7 @@ import type {
 } from '@/types'
 import { isSupportedTextFile } from '@/utils/fileType'
 import { nativeApi } from '@/utils/nativeApi'
-import { baseName, isUnsafeRelativeInput, joinPath, replaceBaseName } from '@/utils/path'
+import { baseName, dirName, isUnsafeRelativeInput, joinPath, normalizeSlashes, replaceBaseName } from '@/utils/path'
 
 type DialogMode = 'input' | 'confirm' | 'unsaved' | null
 
@@ -364,6 +365,58 @@ async function handleOpenFile(entry: SelectedEntry): Promise<void> {
   const opened = await openFile(project, entry.path)
   showNotice(editorState.notice)
   if (opened) await persistConfig()
+}
+
+function getExpandedPathsForEntry(entry: SelectedEntry): string[] {
+  const project = getProject(entry.projectId)
+  if (!project) return []
+
+  const targetPath = entry.type === 'directory' ? entry.path : dirName(entry.path)
+  const root = normalizeSlashes(project.path).replace(/\/+$/, '')
+  const target = normalizeSlashes(targetPath).replace(/\/+$/, '')
+  const rootKey = root.toLowerCase()
+  const targetKey = target.toLowerCase()
+  const expandedPaths = [project.path]
+
+  if (targetKey === rootKey || !targetKey.startsWith(`${rootKey}/`)) {
+    return expandedPaths
+  }
+
+  let currentPath = project.path
+  const relativeParts = target.slice(root.length + 1).split('/').filter(Boolean)
+  for (const part of relativeParts) {
+    currentPath = joinPath(currentPath, part)
+    expandedPaths.push(currentPath)
+  }
+
+  return expandedPaths
+}
+
+function expandTreeToEntry(entry: SelectedEntry): void {
+  for (const path of getExpandedPathsForEntry(entry)) {
+    setPathExpanded(path, true)
+  }
+  treeRefreshKey.value += 1
+}
+
+async function handleJumpToEntry(entry: SelectedEntry): Promise<void> {
+  const project = getProject(entry.projectId)
+  if (!project) {
+    showNotice('项目不存在，无法跳转。')
+    return
+  }
+
+  expandTreeToEntry(entry)
+  setSelectedEntry(entry)
+
+  if (entry.type === 'file') {
+    await openFile(project, entry.path)
+    showNotice(editorState.notice || '已跳转到文件。')
+  } else {
+    showNotice('已跳转到文件夹。')
+  }
+
+  await persistConfig()
 }
 
 async function handleSaveActive(): Promise<void> {

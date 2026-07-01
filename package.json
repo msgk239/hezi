@@ -1,6 +1,6 @@
 {
   "name": "project-box",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "description": "项目盒子 - 本地多项目文件管理与编辑工具",
   "author": "Project Box",
   "private": true,
