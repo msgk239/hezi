@@ -18,7 +18,7 @@ Windows 版本可以在 GitHub Releases 下载：
 
 https://github.com/msgk239/hezi/releases
 
-当前版本：`0.1.9`
+当前版本：`0.1.18`
 
 ## 本地开发
 

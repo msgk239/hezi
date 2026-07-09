@@ -35,7 +35,6 @@
         @context-menu="openContextMenu"
         @expanded-change="handleTreeExpandedChange"
         @sort-mode-change="handleSortModeChange"
-        @folder-sort-mode-change="handleFolderSortModeChange"
         @jump-to-entry="handleJumpToEntry"
       />
 
@@ -178,6 +177,14 @@
           <span>左侧栏宽度</span>
           <input v-model.number="settingsDraft.sidebarWidth" class="setting-input" type="number" min="220" max="520" />
         </label>
+        <label class="setting-row">
+          <span>项目排序</span>
+          <select v-model="settingsDraft.fileSortMode" class="setting-input">
+            <option value="name-asc">名称</option>
+            <option value="modified-desc">最新时间</option>
+            <option value="modified-asc">最早时间</option>
+          </select>
+        </label>
 
         <div class="setting-section-title">项目显示名称</div>
         <div v-if="settingsDraft.projects.length === 0" class="settings-empty">暂无项目。</div>
@@ -246,7 +253,7 @@ import type {
   ShortcutAction,
   UnsavedChoice
 } from '@/types'
-import { isSupportedTextFile } from '@/utils/fileType'
+import { isDefaultAppVideoFile, isSupportedTextFile } from '@/utils/fileType'
 import { nativeApi } from '@/utils/nativeApi'
 import { baseName, dirName, isUnsafeRelativeInput, joinPath, normalizeSlashes, replaceBaseName } from '@/utils/path'
 
@@ -289,15 +296,19 @@ const dialogState = reactive({
 const settingsDraft = reactive({
   fontSize: 14,
   sidebarWidth: 280,
+  fileSortMode: 'name-asc' as FileSortMode,
   projects: [] as ProjectItem[]
 })
 
 const selectedPath = computed(() => projectState.selectedEntry?.path || editorState.activePath)
 const isMarkdownActive = computed(() => activeTab.value?.kind === 'text' && activeTab.value.language === 'markdown')
+const DEFAULT_APP_OPEN_DEBOUNCE_MS = 800
 
 let removeCloseListener: (() => void) | null = null
 let noticeTimer: number | undefined
 let resizingSidebar = false
+let lastDefaultAppOpenPath = ''
+let lastDefaultAppOpenAt = 0
 
 function hasTauriRuntime(): boolean {
   return Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__)
@@ -354,6 +365,36 @@ async function handleAddProject(): Promise<void> {
   }
 }
 
+function isRepeatDefaultAppOpen(path: string): boolean {
+  const now = Date.now()
+  const repeated =
+    lastDefaultAppOpenPath.toLowerCase() === path.toLowerCase() &&
+    now - lastDefaultAppOpenAt < DEFAULT_APP_OPEN_DEBOUNCE_MS
+
+  lastDefaultAppOpenPath = path
+  lastDefaultAppOpenAt = now
+  return repeated
+}
+
+async function openEntryFile(project: ProjectItem, entry: SelectedEntry): Promise<boolean> {
+  editorState.notice = ''
+
+  if (isDefaultAppVideoFile(entry.path)) {
+    if (isRepeatDefaultAppOpen(entry.path)) return true
+
+    const opened = await openDefaultApp(entry.path)
+    if (opened) {
+      editorState.binaryNoticePath = ''
+    } else {
+      lastDefaultAppOpenPath = ''
+      lastDefaultAppOpenAt = 0
+    }
+    return opened
+  }
+
+  return openFile(project, entry.path)
+}
+
 async function handleOpenFile(entry: SelectedEntry): Promise<void> {
   setSelectedEntry(entry)
   const project = getProject(entry.projectId)
@@ -362,7 +403,7 @@ async function handleOpenFile(entry: SelectedEntry): Promise<void> {
     return
   }
 
-  const opened = await openFile(project, entry.path)
+  const opened = await openEntryFile(project, entry)
   showNotice(editorState.notice)
   if (opened) await persistConfig()
 }
@@ -410,8 +451,10 @@ async function handleJumpToEntry(entry: SelectedEntry): Promise<void> {
   setSelectedEntry(entry)
 
   if (entry.type === 'file') {
-    await openFile(project, entry.path)
-    showNotice(editorState.notice || '已跳转到文件。')
+    const openedExternally = isDefaultAppVideoFile(entry.path)
+    const opened = await openEntryFile(project, entry)
+    if (editorState.notice) showNotice(editorState.notice)
+    else if (opened && !openedExternally) showNotice('已跳转到文件。')
   } else {
     showNotice('已跳转到文件夹。')
   }
@@ -533,7 +576,7 @@ function buildContextItems(entry: SelectedEntry): ContextMenuItem[] {
   ]
 
   if (entry.isProjectRoot) {
-    folderItems.push({ id: 'project-remove', label: '从项目列表移除', danger: true })
+    folderItems.push({ id: 'project-remove', label: '从侧边栏移除', danger: true })
   } else {
     folderItems.push({ id: 'delete', label: '删除', danger: true })
   }
@@ -615,9 +658,14 @@ async function closeTabPaths(paths: string[]): Promise<boolean> {
   return true
 }
 
-async function openDefaultApp(path: string): Promise<void> {
+async function openDefaultApp(path: string): Promise<boolean> {
   const result = await nativeApi.file.openWithDefaultApp(path)
-  if (!result.ok) showNotice(result.error)
+  if (!result.ok) {
+    showNotice(result.error)
+    return false
+  }
+
+  return true
 }
 
 async function revealPath(path: string): Promise<void> {
@@ -773,7 +821,7 @@ async function removeProjectFromList(entry: SelectedEntry): Promise<void> {
 
   const confirmed = await askConfirm(
     '移除项目',
-    `只从项目列表移除“${project.name}”，不会删除真实文件。确定继续吗？`,
+    `只从侧边栏移除“${project.name}”，不会删除真实文件。确定继续吗？`,
     true
   )
   if (!confirmed) return
@@ -790,6 +838,7 @@ async function removeProjectFromList(entry: SelectedEntry): Promise<void> {
 function openSettings(): void {
   settingsDraft.fontSize = projectState.settings.fontSize
   settingsDraft.sidebarWidth = projectState.settings.sidebarWidth
+  settingsDraft.fileSortMode = projectState.settings.fileSortMode
   settingsDraft.projects = projectState.projects.map((project) => ({ ...project }))
   settingsVisible.value = true
 }
@@ -797,7 +846,8 @@ function openSettings(): void {
 async function applySettings(): Promise<void> {
   updateSettings({
     fontSize: clampNumber(settingsDraft.fontSize, 10, 28),
-    sidebarWidth: clampNumber(settingsDraft.sidebarWidth, 220, 520)
+    sidebarWidth: clampNumber(settingsDraft.sidebarWidth, 220, 520),
+    fileSortMode: settingsDraft.fileSortMode
   })
 
   for (const draft of settingsDraft.projects) {

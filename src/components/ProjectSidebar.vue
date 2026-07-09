@@ -155,37 +155,11 @@
       </template>
 
       <template v-else>
-        <div class="sidebar-title sidebar-title-row">
-          <span>常用项目</span>
-          <select class="sidebar-title-select" :value="sortMode" title="排序" @change="handleSortModeChange">
-            <option value="name-asc">全局名称</option>
-            <option value="modified-desc">全局最新</option>
-            <option value="modified-asc">全局最早</option>
-          </select>
-        </div>
-
         <div v-if="projects.length === 0" class="sidebar-empty">
           点击顶部“添加项目”开始。
         </div>
 
         <template v-else>
-          <div v-if="selectedSortTarget" class="folder-sort-panel">
-            <span class="folder-sort-label" :title="selectedSortTarget.path">
-              当前：{{ selectedSortTarget.label }}
-            </span>
-            <select
-              class="folder-sort-select"
-              :value="selectedFolderSortChoice"
-              title="文件夹按创建时间，文件按修改时间"
-              @change="handleFolderSortModeChange"
-            >
-              <option value="global">跟随全局</option>
-              <option value="name-asc">名称</option>
-              <option value="modified-desc">最新时间</option>
-              <option value="modified-asc">最早时间</option>
-            </select>
-          </div>
-
           <div class="project-tree-list">
             <FileTree
               v-for="root in rootNodes"
@@ -213,7 +187,6 @@ import FileTree from './FileTree.vue'
 import type {
   DirectoryEntry,
   FileSortMode,
-  FolderSortModeChoice,
   ProjectItem,
   SelectedEntry,
   TreeNode
@@ -239,7 +212,6 @@ const emit = defineEmits<{
   'context-menu': [payload: { entry: SelectedEntry; x: number; y: number }]
   'expanded-change': [payload: { path: string; expanded: boolean }]
   'sort-mode-change': [mode: FileSortMode]
-  'folder-sort-mode-change': [payload: { path: string; mode: FolderSortModeChoice }]
   'jump-to-entry': [entry: SelectedEntry]
 }>()
 
@@ -303,22 +275,6 @@ const selectedFolderScope = computed<SearchRoot | null>(() => {
     rootPath,
     label: entry.type === 'directory' ? entry.name : baseName(rootPath)
   }
-})
-
-const selectedSortTarget = computed(() => {
-  const entry = props.selectedEntry
-  if (!entry) return null
-
-  const path = entry.type === 'directory' ? entry.path : dirName(entry.path)
-  return {
-    path,
-    label: entry.type === 'directory' ? entry.name : baseName(path)
-  }
-})
-
-const selectedFolderSortChoice = computed<FolderSortModeChoice>(() => {
-  if (!selectedSortTarget.value) return 'global'
-  return props.folderSortModes[normalizePathKey(selectedSortTarget.value.path)] || 'global'
 })
 
 const canRunSearch = computed(() => Boolean(searchQuery.value.trim()) && !searching.value)
@@ -430,15 +386,6 @@ async function runPathJump(): Promise<void> {
 function handleSortModeChange(event: Event): void {
   const target = event.target as HTMLSelectElement
   emit('sort-mode-change', target.value as FileSortMode)
-}
-
-function handleFolderSortModeChange(event: Event): void {
-  if (!selectedSortTarget.value) return
-  const target = event.target as HTMLSelectElement
-  emit('folder-sort-mode-change', {
-    path: selectedSortTarget.value.path,
-    mode: target.value as FolderSortModeChoice
-  })
 }
 
 function normalizePathKey(path: string): string {

@@ -231,65 +231,6 @@ button {
   font-weight: 700;
 }
 
-.sidebar-title-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-width: 0;
-  padding-top: 9px;
-  padding-bottom: 9px;
-}
-
-.sidebar-title-row span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sidebar-title-select {
-  flex: 0 0 104px;
-  min-width: 0;
-  height: 26px;
-  border: 1px solid #cbd5e1;
-  border-radius: 5px;
-  background: #ffffff;
-  color: #475569;
-  font-size: 12px;
-  outline: none;
-}
-
-.folder-sort-panel {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 112px;
-  gap: 8px;
-  align-items: center;
-  padding: 8px 10px;
-  border-bottom: 1px solid #d8dde6;
-  background: #f3f6fa;
-}
-
-.folder-sort-label {
-  overflow: hidden;
-  color: #64748b;
-  font-size: 12px;
-  line-height: 18px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.folder-sort-select {
-  width: 100%;
-  min-width: 0;
-  height: 28px;
-  border: 1px solid #cbd5e1;
-  border-radius: 5px;
-  background: #ffffff;
-  color: #273142;
-  font-size: 12px;
-  outline: none;
-}
-
 .sidebar-empty {
   padding: 16px 12px;
   color: #6b7280;
@@ -333,9 +274,7 @@ button {
 }
 
 .sidebar-input:focus,
-.sidebar-select:focus,
-.sidebar-title-select:focus,
-.folder-sort-select:focus {
+.sidebar-select:focus {
   border-color: #2563eb;
   box-shadow: 0 0 0 3px rgb(37 99 235 / 12%);
 }

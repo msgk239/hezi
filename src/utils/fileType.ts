@@ -25,8 +25,26 @@ const SUPPORTED_AUDIO_EXTENSIONS = new Set([
   '.webm'
 ])
 
+const DEFAULT_APP_VIDEO_EXTENSIONS = new Set([
+  '.mp4',
+  '.m4v',
+  '.mov',
+  '.mkv',
+  '.avi',
+  '.wmv',
+  '.flv',
+  '.webm',
+  '.mpeg',
+  '.mpg',
+  '.3gp',
+  '.3g2',
+  '.ts',
+  '.mts',
+  '.m2ts'
+])
+
 export function isSupportedTextFile(path: string): boolean {
-  return !isSupportedImageFile(path) && !isSupportedAudioFile(path)
+  return !isSupportedImageFile(path) && !isSupportedAudioFile(path) && !isDefaultAppVideoFile(path)
 }
 
 export function isSupportedImageFile(path: string): boolean {
@@ -35,6 +53,10 @@ export function isSupportedImageFile(path: string): boolean {
 
 export function isSupportedAudioFile(path: string): boolean {
   return SUPPORTED_AUDIO_EXTENSIONS.has(extensionName(path))
+}
+
+export function isDefaultAppVideoFile(path: string): boolean {
+  return DEFAULT_APP_VIDEO_EXTENSIONS.has(extensionName(path))
 }
 
 export function getSupportedFileKind(path: string): EditorTabKind {
