@@ -14,8 +14,6 @@ export interface NativeApi {
     selectProjectFolder(): Promise<ApiResult<ProjectFolderSelection | null>>
   }
   file: {
-    watchDirectory(dirPath: string): Promise<ApiResult<void>>
-    unwatchDirectory(dirPath: string): Promise<ApiResult<void>>
     readDir(dirPath: string): Promise<ApiResult<DirectoryEntry[]>>
     readFile(filePath: string): Promise<ApiResult<string>>
     readMediaFile(filePath: string): Promise<ApiResult<string>>
@@ -64,10 +62,6 @@ export const nativeApi: NativeApi = {
       call<ProjectFolderSelection | null>('select_project_folder')
   },
   file: {
-    watchDirectory: (dirPath) =>
-      testApi()?.file.watchDirectory(dirPath) ?? call<void>('watch_directory', { dirPath }),
-    unwatchDirectory: (dirPath) =>
-      testApi()?.file.unwatchDirectory(dirPath) ?? call<void>('unwatch_directory', { dirPath }),
     readDir: (dirPath) => testApi()?.file.readDir(dirPath) ?? call<DirectoryEntry[]>('read_dir', { dirPath }),
     readFile: (filePath) => testApi()?.file.readFile(filePath) ?? call<string>('read_file', { filePath }),
     readMediaFile: (filePath) =>

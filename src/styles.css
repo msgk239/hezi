@@ -231,6 +231,45 @@ button {
   font-weight: 700;
 }
 
+.sidebar-files-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 44px;
+  padding: 7px 10px 7px 12px;
+}
+
+.sidebar-refresh-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 11px;
+  border: 1px solid #2563eb;
+  border-radius: 6px;
+  background: #2563eb;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.sidebar-refresh-button:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+
+.sidebar-refresh-button:disabled {
+  border-color: #cbd5e1;
+  background: #e2e8f0;
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+
+.sidebar-refresh-icon {
+  font-size: 17px;
+  line-height: 1;
+}
+
 .sidebar-empty {
   padding: 16px 12px;
   color: #6b7280;

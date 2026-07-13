@@ -125,8 +125,6 @@ export function installProjectBoxTestNative(): void {
       selectProjectFolder: async () => ok(null)
     },
     file: {
-      watchDirectory: async () => ok(undefined),
-      unwatchDirectory: async () => ok(undefined),
       readDir: async (dirPath) => ok(directoryEntries(dirPath)),
       readFile: async (filePath) => ok(fileContents[filePath] ?? ''),
       readMediaFile: async () => ok(''),

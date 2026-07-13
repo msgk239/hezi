@@ -155,6 +155,20 @@
       </template>
 
       <template v-else>
+        <div class="sidebar-title sidebar-files-header">
+          <span>项目文件</span>
+          <button
+            class="sidebar-refresh-button"
+            type="button"
+            title="重新读取项目文件"
+            :disabled="projects.length === 0"
+            @click.stop="$emit('refresh')"
+          >
+            <span class="sidebar-refresh-icon" aria-hidden="true">↻</span>
+            刷新
+          </button>
+        </div>
+
         <div v-if="projects.length === 0" class="sidebar-empty">
           点击顶部“添加项目”开始。
         </div>
@@ -163,13 +177,12 @@
           <div class="project-tree-list">
             <FileTree
               v-for="root in rootNodes"
-              :key="`${root.projectId}-${refreshKey}`"
+              :key="root.projectId"
               :node="root"
               :level="0"
               :selected-path="selectedPath"
               :refresh-key="refreshKey"
               :get-sort-mode="getFolderSortModeForPath"
-              :get-directory-refresh-version="getDirectoryRefreshVersion"
               @open-file="$emit('open-file', $event)"
               @select-entry="$emit('select-entry', $event)"
               @context-menu="$emit('context-menu', $event)"
@@ -205,7 +218,6 @@ const props = defineProps<{
   refreshKey: number
   sortMode: FileSortMode
   folderSortModes: Record<string, FileSortMode>
-  getDirectoryRefreshVersion: (path: string) => number
 }>()
 
 const emit = defineEmits<{
@@ -215,6 +227,7 @@ const emit = defineEmits<{
   'expanded-change': [payload: { path: string; expanded: boolean }]
   'sort-mode-change': [mode: FileSortMode]
   'jump-to-entry': [entry: SelectedEntry]
+  refresh: []
 }>()
 
 interface SearchRoot {
@@ -566,10 +579,7 @@ function formatModifiedAt(value?: number): string {
 }
 
 watch(
-  () => [
-    props.refreshKey,
-    props.projects.map((project) => `${project.id}:${project.name}:${project.path}`).join('|')
-  ],
+  () => props.projects.map((project) => `${project.id}:${project.name}:${project.path}`).join('|'),
   rebuildRoots,
   { immediate: true }
 )

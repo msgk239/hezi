@@ -16,7 +16,6 @@ tauri-build = { version = "2", features = [] }
 arboard = "3"
 base64 = "0.22"
 dirs = "6"
-notify = "8.2"
 open = "5"
 pathdiff = "0.2"
 rfd = "0.15"

@@ -37,10 +37,6 @@ export interface DirectoryEntry {
   modifiedAt?: number
 }
 
-export interface DirectoriesChangedPayload {
-  paths: string[]
-}
-
 export interface PathInfo {
   path: string
   name: string
