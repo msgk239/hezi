@@ -169,6 +169,7 @@
               :selected-path="selectedPath"
               :refresh-key="refreshKey"
               :get-sort-mode="getFolderSortModeForPath"
+              :get-directory-refresh-version="getDirectoryRefreshVersion"
               @open-file="$emit('open-file', $event)"
               @select-entry="$emit('select-entry', $event)"
               @context-menu="$emit('context-menu', $event)"
@@ -204,6 +205,7 @@ const props = defineProps<{
   refreshKey: number
   sortMode: FileSortMode
   folderSortModes: Record<string, FileSortMode>
+  getDirectoryRefreshVersion: (path: string) => number
 }>()
 
 const emit = defineEmits<{

@@ -30,6 +30,7 @@
         :refresh-key="treeRefreshKey"
         :sort-mode="projectState.settings.fileSortMode"
         :folder-sort-modes="projectState.settings.folderSortModes"
+        :get-directory-refresh-version="getDirectoryRefreshVersion"
         @open-file="handleOpenFile"
         @select-entry="setSelectedEntry"
         @context-menu="openContextMenu"
@@ -203,6 +204,7 @@
 </template>
 
 <script setup lang="ts">
+import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import CodeEditor from '@/components/CodeEditor.vue'
@@ -216,6 +218,7 @@ import {
   buildConfig,
   getFolderSortOverride,
   loadProjectConfig,
+  normalizePathKey,
   projectState,
   removeExpandedPathsUnder,
   removeProject,
@@ -245,6 +248,7 @@ import {
 } from '@/stores/editorStore'
 import type {
   ContextMenuItem,
+  DirectoriesChangedPayload,
   EditorTab,
   FileSortMode,
   FolderSortModeChoice,
@@ -260,6 +264,7 @@ import { baseName, dirName, isUnsafeRelativeInput, joinPath, normalizeSlashes, r
 type DialogMode = 'input' | 'confirm' | 'unsaved' | null
 
 const treeRefreshKey = ref(0)
+const directoryRefreshVersions = reactive<Record<string, number>>({})
 const notice = ref('')
 const settingsVisible = ref(false)
 const allowWindowClose = ref(false)
@@ -305,6 +310,7 @@ const isMarkdownActive = computed(() => activeTab.value?.kind === 'text' && acti
 const DEFAULT_APP_OPEN_DEBOUNCE_MS = 800
 
 let removeCloseListener: (() => void) | null = null
+let removeDirectoryChangeListener: (() => void) | null = null
 let noticeTimer: number | undefined
 let resizingSidebar = false
 let lastDefaultAppOpenPath = ''
@@ -333,6 +339,17 @@ function showNotice(message: string): void {
 
 function getProject(projectId: string): ProjectItem | undefined {
   return projectState.projects.find((project) => project.id === projectId)
+}
+
+function getDirectoryRefreshVersion(path: string): number {
+  return directoryRefreshVersions[normalizePathKey(path)] ?? 0
+}
+
+function markDirectoriesChanged(paths: string[]): void {
+  for (const path of paths) {
+    const key = normalizePathKey(path)
+    directoryRefreshVersions[key] = (directoryRefreshVersions[key] ?? 0) + 1
+  }
 }
 
 async function persistConfig(): Promise<void> {
@@ -720,7 +737,7 @@ async function createFileInFolder(entry: SelectedEntry): Promise<void> {
     return
   }
 
-  treeRefreshKey.value += 1
+  markDirectoriesChanged([entry.path, dirName(filePath)])
   showNotice('文件已创建。')
 
   if (isSupportedTextFile(filePath)) {
@@ -749,7 +766,7 @@ async function createFolderInFolder(entry: SelectedEntry): Promise<void> {
     return
   }
 
-  treeRefreshKey.value += 1
+  markDirectoriesChanged([entry.path, dirName(folderPath)])
   showNotice('文件夹已创建。')
 }
 
@@ -786,7 +803,7 @@ async function renameEntry(entry: SelectedEntry): Promise<void> {
     name: baseName(newPath),
     path: newPath
   })
-  treeRefreshKey.value += 1
+  markDirectoriesChanged([dirName(entry.path), dirName(newPath)])
   showNotice('重命名完成。')
   await persistConfig()
 }
@@ -810,7 +827,7 @@ async function deleteEntry(entry: SelectedEntry): Promise<void> {
 
   if (projectState.selectedEntry?.path === entry.path) setSelectedEntry(null)
   removeExpandedPathsUnder(entry.path)
-  treeRefreshKey.value += 1
+  markDirectoriesChanged([dirName(entry.path)])
   showNotice('已删除到回收站。')
   await persistConfig()
 }
@@ -1079,19 +1096,24 @@ watch(
 )
 
 onMounted(async () => {
-  const config = await loadProjectConfig()
-  await restoreOpenedFiles(projectState.projects, config.openedFiles, config.activeFilePath)
   if (hasTauriRuntime()) {
+    removeDirectoryChangeListener = await listen<DirectoriesChangedPayload>(
+      'directories-changed',
+      ({ payload }) => markDirectoriesChanged(payload.paths)
+    )
     removeCloseListener = await getCurrentWindow().onCloseRequested((event) => {
       void handleTauriClose(event)
     })
   }
+  const config = await loadProjectConfig()
+  await restoreOpenedFiles(projectState.projects, config.openedFiles, config.activeFilePath)
   window.addEventListener('keydown', handleRendererKeydown)
   window.addEventListener('beforeunload', handleBeforeUnload)
 })
 
 onBeforeUnmount(() => {
   removeCloseListener?.()
+  removeDirectoryChangeListener?.()
   window.removeEventListener('keydown', handleRendererKeydown)
   window.removeEventListener('beforeunload', handleBeforeUnload)
   window.removeEventListener('mousemove', handleSidebarResize)

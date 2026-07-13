@@ -1,16 +1,22 @@
 use arboard::Clipboard;
 use base64::{engine::general_purpose, Engine as _};
+use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use pathdiff::diff_paths;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering as CmpOrdering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(target_os = "windows")]
-use std::sync::{Mutex, OnceLock};
-use tauri::{LogicalPosition, LogicalSize, Manager, Runtime, WebviewWindow};
+use std::sync::OnceLock;
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+use tauri::{
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Runtime, State, WebviewWindow,
+};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -84,20 +90,34 @@ struct PathInfo {
     modified_at: u128,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct DirectoriesChangedPayload {
+    paths: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct WatchedDirectory {
+    path: PathBuf,
+    subscribers: usize,
+}
+
+struct DirectoryWatchState {
+    watcher: Mutex<RecommendedWatcher>,
+    watched: Arc<Mutex<HashMap<String, WatchedDirectory>>>,
+}
+
+enum DirectoryWatchMessage {
+    Event(Event),
+    Rescan,
+}
+
 const CONFIG_FILE_NAME: &str = "project-box-config.json";
 const MAX_TEXT_EDIT_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_MEDIA_PREVIEW_BYTES: u64 = 100 * 1024 * 1024;
-const IGNORED_DIRS: &[&str] = &[
-    "node_modules",
-    ".git",
-    "dist",
-    "build",
-    ".next",
-    ".nuxt",
-    ".cache",
-    "vendor",
-    "target",
-];
+const DIRECTORIES_CHANGED_EVENT: &str = "directories-changed";
+const WATCH_DEBOUNCE: Duration = Duration::from_millis(300);
+const WATCH_MAX_BATCH: Duration = Duration::from_millis(1_000);
 
 fn default_config() -> AppConfig {
     AppConfig {
@@ -122,6 +142,195 @@ fn err(action: &str, error: impl std::fmt::Display) -> String {
 
 fn path_to_string(path: impl AsRef<Path>) -> String {
     path.as_ref().to_string_lossy().to_string()
+}
+
+fn normalize_watch_key(path: impl AsRef<Path>) -> String {
+    let mut key = path_to_string(path).replace('\\', "/");
+
+    if let Some(stripped) = key.strip_prefix("//?/UNC/") {
+        key = format!("//{stripped}");
+    } else if let Some(stripped) = key.strip_prefix("//?/") {
+        key = stripped.to_string();
+    }
+
+    while key.len() > 1 && key.ends_with('/') {
+        key.pop();
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        key = key.to_lowercase();
+    }
+
+    key
+}
+
+fn collect_all_watched_keys(
+    watched: &Arc<Mutex<HashMap<String, WatchedDirectory>>>,
+    dirty: &mut HashSet<String>,
+) {
+    if let Ok(watched) = watched.lock() {
+        dirty.extend(watched.keys().cloned());
+    }
+}
+
+fn collect_event_watched_keys(
+    event: Event,
+    watched: &Arc<Mutex<HashMap<String, WatchedDirectory>>>,
+    dirty: &mut HashSet<String>,
+    rescan: &mut bool,
+) {
+    if event.need_rescan() {
+        *rescan = true;
+        return;
+    }
+
+    let Ok(watched) = watched.lock() else {
+        *rescan = true;
+        return;
+    };
+
+    if watched.is_empty() {
+        return;
+    }
+
+    let mut matched = false;
+    for event_path in &event.paths {
+        if let Some(parent) = event_path.parent() {
+            let parent_key = normalize_watch_key(parent);
+            if watched.contains_key(&parent_key) {
+                dirty.insert(parent_key);
+                matched = true;
+                continue;
+            }
+        }
+
+        let event_key = normalize_watch_key(event_path);
+        if watched.contains_key(&event_key) {
+            dirty.insert(event_key);
+            matched = true;
+        }
+    }
+
+    if !matched {
+        *rescan = true;
+    }
+}
+
+fn merge_watch_message(
+    message: DirectoryWatchMessage,
+    watched: &Arc<Mutex<HashMap<String, WatchedDirectory>>>,
+    dirty: &mut HashSet<String>,
+    rescan: &mut bool,
+) {
+    match message {
+        DirectoryWatchMessage::Event(event) => {
+            collect_event_watched_keys(event, watched, dirty, rescan)
+        }
+        DirectoryWatchMessage::Rescan => *rescan = true,
+    }
+}
+
+fn emit_directory_changes(
+    app_handle: &AppHandle,
+    watched: &Arc<Mutex<HashMap<String, WatchedDirectory>>>,
+    dirty: &HashSet<String>,
+    rescan: bool,
+) {
+    let Ok(watched) = watched.lock() else {
+        return;
+    };
+
+    let mut paths = if rescan {
+        watched
+            .values()
+            .map(|entry| path_to_string(&entry.path))
+            .collect::<Vec<_>>()
+    } else {
+        dirty
+            .iter()
+            .filter_map(|key| watched.get(key))
+            .map(|entry| path_to_string(&entry.path))
+            .collect::<Vec<_>>()
+    };
+
+    paths.sort_by_key(|path| path.to_lowercase());
+    paths.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+
+    if !paths.is_empty() {
+        let _ = app_handle.emit(
+            DIRECTORIES_CHANGED_EVENT,
+            DirectoriesChangedPayload { paths },
+        );
+    }
+}
+
+fn run_directory_watch_worker(
+    app_handle: AppHandle,
+    watched: Arc<Mutex<HashMap<String, WatchedDirectory>>>,
+    receiver: mpsc::Receiver<DirectoryWatchMessage>,
+) {
+    thread::spawn(move || loop {
+        let first = match receiver.recv() {
+            Ok(message) => message,
+            Err(_) => return,
+        };
+
+        let started_at = Instant::now();
+        let mut quiet_deadline = started_at + WATCH_DEBOUNCE;
+        let max_deadline = started_at + WATCH_MAX_BATCH;
+        let mut dirty = HashSet::new();
+        let mut rescan = false;
+        let mut disconnected = false;
+        merge_watch_message(first, &watched, &mut dirty, &mut rescan);
+
+        loop {
+            let now = Instant::now();
+            let flush_at = quiet_deadline.min(max_deadline);
+            if now >= flush_at {
+                break;
+            }
+
+            match receiver.recv_timeout(flush_at.saturating_duration_since(now)) {
+                Ok(message) => {
+                    merge_watch_message(message, &watched, &mut dirty, &mut rescan);
+                    quiet_deadline = Instant::now() + WATCH_DEBOUNCE;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+
+        if rescan {
+            collect_all_watched_keys(&watched, &mut dirty);
+        }
+        emit_directory_changes(&app_handle, &watched, &dirty, rescan);
+
+        if disconnected {
+            return;
+        }
+    });
+}
+
+fn create_directory_watch_state(app_handle: AppHandle) -> notify::Result<DirectoryWatchState> {
+    let watched = Arc::new(Mutex::new(HashMap::new()));
+    let (sender, receiver) = mpsc::channel();
+    let watcher = notify::recommended_watcher(move |result| {
+        let message = match result {
+            Ok(event) => DirectoryWatchMessage::Event(event),
+            Err(_) => DirectoryWatchMessage::Rescan,
+        };
+        let _ = sender.send(message);
+    })?;
+
+    run_directory_watch_worker(app_handle, watched.clone(), receiver);
+    Ok(DirectoryWatchState {
+        watcher: Mutex::new(watcher),
+        watched,
+    })
 }
 
 fn file_name(path: impl AsRef<Path>) -> String {
@@ -212,6 +421,74 @@ fn select_project_folder() -> Result<Option<ProjectFolderSelection>, String> {
 }
 
 #[tauri::command]
+fn watch_directory(dir_path: String, state: State<'_, DirectoryWatchState>) -> Result<(), String> {
+    let path = PathBuf::from(&dir_path);
+    let metadata = fs::metadata(&path).map_err(|error| err("监听目录", error))?;
+    if !metadata.is_dir() {
+        return Err(err("监听目录", "目标不是文件夹"));
+    }
+
+    let key = normalize_watch_key(&path);
+    let mut watched = state
+        .watched
+        .lock()
+        .map_err(|_| err("监听目录", "监听状态不可用"))?;
+
+    if let Some(entry) = watched.get_mut(&key) {
+        entry.subscribers += 1;
+        return Ok(());
+    }
+
+    state
+        .watcher
+        .lock()
+        .map_err(|_| err("监听目录", "监听器不可用"))?
+        .watch(&path, RecursiveMode::NonRecursive)
+        .map_err(|error| err("监听目录", error))?;
+
+    watched.insert(
+        key,
+        WatchedDirectory {
+            path,
+            subscribers: 1,
+        },
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn unwatch_directory(
+    dir_path: String,
+    state: State<'_, DirectoryWatchState>,
+) -> Result<(), String> {
+    let key = normalize_watch_key(&dir_path);
+    let mut watched = state
+        .watched
+        .lock()
+        .map_err(|_| err("停止监听目录", "监听状态不可用"))?;
+
+    let Some(entry) = watched.get_mut(&key) else {
+        return Ok(());
+    };
+
+    if entry.subscribers > 1 {
+        entry.subscribers -= 1;
+        return Ok(());
+    }
+
+    let path = entry.path.clone();
+    watched.remove(&key);
+    drop(watched);
+
+    let _ = state
+        .watcher
+        .lock()
+        .map_err(|_| err("停止监听目录", "监听器不可用"))?
+        .unwatch(&path);
+    Ok(())
+}
+
+#[tauri::command]
 fn read_dir(dir_path: String) -> Result<Vec<DirectoryEntry>, String> {
     let mut entries = vec![];
     let read_dir = fs::read_dir(&dir_path).map_err(|error| err("读取目录", error))?;
@@ -229,17 +506,8 @@ fn read_dir(dir_path: String) -> Result<Vec<DirectoryEntry>, String> {
             continue;
         }
 
-        let name = file_name(&path);
-        if is_dir
-            && IGNORED_DIRS
-                .iter()
-                .any(|ignored| ignored.eq_ignore_ascii_case(&name))
-        {
-            continue;
-        }
-
         entries.push(DirectoryEntry {
-            name,
+            name: file_name(&path),
             path: path_to_string(&path),
             entry_type: if is_dir { "directory" } else { "file" }.to_string(),
             size: Some(metadata.len()),
@@ -756,12 +1024,16 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             fit_main_window_to_work_area(app);
+            let watch_state = create_directory_watch_state(app.handle().clone())?;
+            app.manage(watch_state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_config,
             save_config,
             select_project_folder,
+            watch_directory,
+            unwatch_directory,
             read_dir,
             read_file,
             read_media_file,
@@ -779,4 +1051,71 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("运行项目盒子失败");
+}
+
+#[cfg(test)]
+mod directory_watch_tests {
+    use super::*;
+
+    fn watched_registry(paths: &[&str]) -> Arc<Mutex<HashMap<String, WatchedDirectory>>> {
+        let watched = paths
+            .iter()
+            .map(|path| {
+                let path = PathBuf::from(path);
+                (
+                    normalize_watch_key(&path),
+                    WatchedDirectory {
+                        path,
+                        subscribers: 1,
+                    },
+                )
+            })
+            .collect();
+        Arc::new(Mutex::new(watched))
+    }
+
+    #[test]
+    fn file_event_marks_its_expanded_parent() {
+        let watched = watched_registry(&[r"D:\workspace"]);
+        let event =
+            Event::new(notify::EventKind::Any).add_path(PathBuf::from(r"D:\workspace\notes.txt"));
+        let mut dirty = HashSet::new();
+        let mut rescan = false;
+
+        collect_event_watched_keys(event, &watched, &mut dirty, &mut rescan);
+
+        assert!(!rescan);
+        assert_eq!(dirty, HashSet::from([normalize_watch_key(r"D:\workspace")]));
+    }
+
+    #[test]
+    fn nested_event_marks_only_the_expanded_nested_directory() {
+        let watched = watched_registry(&[r"D:\workspace", r"D:\workspace\src"]);
+        let event =
+            Event::new(notify::EventKind::Any).add_path(PathBuf::from(r"D:\workspace\src\main.rs"));
+        let mut dirty = HashSet::new();
+        let mut rescan = false;
+
+        collect_event_watched_keys(event, &watched, &mut dirty, &mut rescan);
+
+        assert!(!rescan);
+        assert_eq!(
+            dirty,
+            HashSet::from([normalize_watch_key(r"D:\workspace\src")])
+        );
+    }
+
+    #[test]
+    fn unknown_event_requests_a_safe_rescan() {
+        let watched = watched_registry(&[r"D:\workspace"]);
+        let event =
+            Event::new(notify::EventKind::Any).add_path(PathBuf::from(r"D:\elsewhere\notes.txt"));
+        let mut dirty = HashSet::new();
+        let mut rescan = false;
+
+        collect_event_watched_keys(event, &watched, &mut dirty, &mut rescan);
+
+        assert!(rescan);
+        assert!(dirty.is_empty());
+    }
 }

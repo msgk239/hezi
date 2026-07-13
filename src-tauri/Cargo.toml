@@ -1,6 +1,6 @@
 [package]
 name = "project-box"
-version = "0.1.18"
+version = "0.1.19"
 description = "项目盒子 - 本地多项目文件管理与编辑工具"
 authors = ["Project Box"]
 edition = "2021"
@@ -16,6 +16,7 @@ tauri-build = { version = "2", features = [] }
 arboard = "3"
 base64 = "0.22"
 dirs = "6"
+notify = "8.2"
 open = "5"
 pathdiff = "0.2"
 rfd = "0.15"

@@ -33,6 +33,7 @@
         :selected-path="selectedPath"
         :refresh-key="refreshKey"
         :get-sort-mode="getSortMode"
+        :get-directory-refresh-version="getDirectoryRefreshVersion"
         @open-file="$emit('open-file', $event)"
         @select-entry="$emit('select-entry', $event)"
         @context-menu="$emit('context-menu', $event)"
@@ -43,8 +44,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, watch } from 'vue'
-import type { FileSortMode, SelectedEntry, TreeNode } from '@/types'
+import { computed, onBeforeUnmount, onMounted, watch } from 'vue'
+import type { DirectoryEntry, FileSortMode, SelectedEntry, TreeNode } from '@/types'
 import { shouldDirectoryStartExpanded } from '@/stores/projectStore'
 import { sortFileEntries } from '@/utils/fileSort'
 import { nativeApi } from '@/utils/nativeApi'
@@ -55,6 +56,7 @@ const props = defineProps<{
   selectedPath: string
   refreshKey: number
   getSortMode: (path: string) => FileSortMode
+  getDirectoryRefreshVersion: (path: string) => number
 }>()
 
 const emit = defineEmits<{
@@ -65,6 +67,13 @@ const emit = defineEmits<{
 }>()
 
 const sortedChildren = computed(() => sortFileEntries(props.node.children ?? [], props.getSortMode(props.node.path)))
+
+let disposed = false
+let loadInProgress = false
+let refreshQueued = false
+let watchGeneration = 0
+let watchedPath = ''
+let watchStartingPath = ''
 
 function toSelectedEntry(): SelectedEntry {
   return {
@@ -77,20 +86,12 @@ function toSelectedEntry(): SelectedEntry {
   }
 }
 
-async function loadChildren(): Promise<void> {
-  if (props.node.type !== 'directory' || props.node.loaded || props.node.loading) return
+function normalizeNodePath(path: string): string {
+  return path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+}
 
-  props.node.loading = true
-  props.node.error = ''
-  const result = await nativeApi.file.readDir(props.node.path)
-  props.node.loading = false
-
-  if (!result.ok) {
-    props.node.error = result.error
-    return
-  }
-
-  props.node.children = result.data.map((entry) => ({
+function createTreeNode(entry: DirectoryEntry): TreeNode {
+  return {
     ...entry,
     projectId: props.node.projectId,
     projectRoot: props.node.projectRoot,
@@ -98,8 +99,119 @@ async function loadChildren(): Promise<void> {
     loaded: false,
     loading: false,
     children: []
-  }))
-  props.node.loaded = true
+  }
+}
+
+function reconcileChildren(entries: DirectoryEntry[]): TreeNode[] {
+  const existingByPath = new Map(
+    (props.node.children ?? []).map((child) => [normalizeNodePath(child.path), child])
+  )
+
+  return entries.map((entry) => {
+    const existing = existingByPath.get(normalizeNodePath(entry.path))
+    if (!existing || existing.type !== entry.type) return createTreeNode(entry)
+
+    existing.name = entry.name
+    existing.path = entry.path
+    existing.size = entry.size
+    existing.createdAt = entry.createdAt
+    existing.modifiedAt = entry.modifiedAt
+    existing.projectId = props.node.projectId
+    existing.projectRoot = props.node.projectRoot
+    return existing
+  })
+}
+
+async function loadChildren(force = false): Promise<void> {
+  if (props.node.type !== 'directory' || (!force && props.node.loaded)) return
+
+  if (loadInProgress) {
+    if (force) refreshQueued = true
+    return
+  }
+
+  loadInProgress = true
+  const initialLoad = !props.node.loaded
+  if (initialLoad) props.node.loading = true
+  props.node.error = ''
+  const requestedPath = props.node.path
+  const result = await nativeApi.file.readDir(requestedPath)
+  loadInProgress = false
+  if (initialLoad) props.node.loading = false
+
+  if (disposed || normalizeNodePath(props.node.path) !== normalizeNodePath(requestedPath)) return
+
+  if (!result.ok) {
+    props.node.error = result.error
+  } else {
+    props.node.children = reconcileChildren(result.data)
+    props.node.loaded = true
+  }
+
+  if (!refreshQueued) return
+
+  refreshQueued = false
+  if (props.node.expanded) {
+    await loadChildren(true)
+  } else {
+    props.node.loaded = false
+  }
+}
+
+async function startWatchingDirectory(): Promise<void> {
+  if (disposed || props.node.type !== 'directory' || !props.node.expanded) return
+
+  const targetPath = props.node.path
+  const targetKey = normalizeNodePath(targetPath)
+  if (normalizeNodePath(watchedPath) === targetKey || normalizeNodePath(watchStartingPath) === targetKey) return
+
+  const generation = watchGeneration + 1
+  watchGeneration = generation
+  watchStartingPath = targetPath
+  const result = await nativeApi.file.watchDirectory(targetPath)
+  if (normalizeNodePath(watchStartingPath) === targetKey) watchStartingPath = ''
+
+  if (!result.ok) {
+    if (!disposed && generation === watchGeneration) {
+      console.warn(`无法自动刷新目录 ${targetPath}：${result.error}`)
+    }
+    return
+  }
+
+  const stillExpanded = props.node.type === 'directory' && Boolean(props.node.expanded)
+  const samePath = normalizeNodePath(props.node.path) === targetKey
+  if (disposed || generation !== watchGeneration || !stillExpanded || !samePath) {
+    await nativeApi.file.unwatchDirectory(targetPath)
+    if (!disposed && props.node.type === 'directory' && props.node.expanded) {
+      void syncDirectoryWatch()
+    }
+    return
+  }
+
+  watchedPath = targetPath
+}
+
+async function stopWatchingDirectory(): Promise<void> {
+  watchGeneration += 1
+  const targetPath = watchedPath
+  watchedPath = ''
+  if (!targetPath) return
+
+  const result = await nativeApi.file.unwatchDirectory(targetPath)
+  if (!result.ok && !disposed) {
+    console.warn(`无法停止自动刷新目录 ${targetPath}：${result.error}`)
+  }
+}
+
+async function syncDirectoryWatch(): Promise<void> {
+  if (props.node.type === 'directory' && props.node.expanded) {
+    if (watchedPath && normalizeNodePath(watchedPath) !== normalizeNodePath(props.node.path)) {
+      await stopWatchingDirectory()
+    }
+    await startWatchingDirectory()
+  } else {
+    await stopWatchingDirectory()
+  }
 }
 
 async function toggleDirectory(): Promise<void> {
@@ -111,7 +223,7 @@ async function toggleDirectory(): Promise<void> {
     expanded: Boolean(props.node.expanded)
   })
 
-  if (props.node.expanded) await loadChildren()
+  if (props.node.expanded) await loadChildren(true)
 }
 
 async function handleClick(): Promise<void> {
@@ -138,18 +250,43 @@ function handleContextMenu(event: MouseEvent): void {
 
 onMounted(() => {
   if (props.node.type === 'directory' && props.node.expanded) {
+    void startWatchingDirectory()
     void loadChildren()
   }
 })
+
+onBeforeUnmount(() => {
+  disposed = true
+  void stopWatchingDirectory()
+})
+
+watch(
+  () => [props.node.path, props.node.expanded] as const,
+  () => void syncDirectoryWatch()
+)
+
+watch(
+  () => props.getDirectoryRefreshVersion(props.node.path),
+  () => {
+    if (props.node.type !== 'directory') return
+    if (props.node.expanded) {
+      void loadChildren(true)
+    } else {
+      props.node.loaded = false
+    }
+  }
+)
 
 watch(
   () => props.refreshKey,
   () => {
     if (props.node.type !== 'directory') return
-    props.node.loaded = false
-    props.node.children = []
     props.node.error = ''
-    if (props.node.expanded) void loadChildren()
+    if (props.node.expanded) {
+      void loadChildren(true)
+    } else {
+      props.node.loaded = false
+    }
   }
 )
 </script>
