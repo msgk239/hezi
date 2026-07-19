@@ -363,6 +363,20 @@ button {
   line-height: 17px;
 }
 
+.path-jump-hint,
+.sidebar-path-notice {
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.path-jump-hint {
+  color: #64748b;
+}
+
+.sidebar-path-notice {
+  color: #15803d;
+}
+
 .project-tree-list {
   padding: 6px 0 14px;
 }

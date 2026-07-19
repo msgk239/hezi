@@ -123,35 +123,31 @@
       </template>
 
       <template v-else-if="sidebarView === 'jump'">
-        <div class="sidebar-title">路径</div>
+        <div class="sidebar-title">路径跳转 / 打开</div>
 
-        <div v-if="projects.length === 0" class="sidebar-empty">
-          点击顶部“添加项目”开始。
-        </div>
+        <div class="sidebar-tools path-jump-tools">
+          <input
+            ref="pathJumpInputRef"
+            v-model="pathJumpValue"
+            class="sidebar-input"
+            type="text"
+            placeholder="D:\project\src\app.ts"
+            @keydown.enter="runPathJump"
+          />
 
-        <template v-else>
-          <div class="sidebar-tools path-jump-tools">
-            <input
-              ref="pathJumpInputRef"
-              v-model="pathJumpValue"
-              class="sidebar-input"
-              type="text"
-              placeholder="D:\project\src\app.ts"
-              @keydown.enter="runPathJump"
-            />
-
-            <div class="sidebar-tool-row">
-              <button class="sidebar-button primary" type="button" :disabled="!canRunPathJump" @click="runPathJump">
-                跳转
-              </button>
-              <button class="sidebar-button" type="button" :disabled="!pathJumpValue" @click="clearPathJump">
-                清除
-              </button>
-            </div>
-
-            <div v-if="pathJumpError" class="sidebar-search-error">{{ pathJumpError }}</div>
+          <div class="sidebar-tool-row">
+            <button class="sidebar-button primary" type="button" :disabled="!canRunPathJump" @click="runPathJump">
+              跳转 / 打开
+            </button>
+            <button class="sidebar-button" type="button" :disabled="!pathJumpValue" @click="clearPathJump">
+              清除
+            </button>
           </div>
-        </template>
+
+          <div class="path-jump-hint">项目内路径会定位到项目树，其他路径会使用系统打开。</div>
+          <div v-if="pathJumpError" class="sidebar-search-error">{{ pathJumpError }}</div>
+          <div v-else-if="pathJumpNotice" class="sidebar-path-notice">{{ pathJumpNotice }}</div>
+        </div>
       </template>
 
       <template v-else>
@@ -272,6 +268,7 @@ const searchError = ref('')
 const searchLimitReached = ref(false)
 const pathJumpValue = ref('')
 const pathJumpError = ref('')
+const pathJumpNotice = ref('')
 const pathJumping = ref(false)
 let searchRunId = 0
 
@@ -346,6 +343,7 @@ function cleanPathJumpInput(input: string): string {
 function clearPathJump(): void {
   pathJumpValue.value = ''
   pathJumpError.value = ''
+  pathJumpNotice.value = ''
 }
 
 function findProjectForPath(path: string): ProjectItem | null {
@@ -361,41 +359,54 @@ async function runPathJump(): Promise<void> {
   if (!path || pathJumping.value) return
 
   if (!isAbsolutePath(path)) {
+    pathJumpNotice.value = ''
     pathJumpError.value = '请输入绝对路径。'
-    return
-  }
-
-  const project = findProjectForPath(path)
-  if (!project) {
-    pathJumpError.value = '路径不在已添加项目中。'
     return
   }
 
   pathJumping.value = true
   pathJumpError.value = ''
-  const result = await nativeApi.file.getPathInfo(path)
-  pathJumping.value = false
+  pathJumpNotice.value = ''
 
-  if (!result.ok) {
-    pathJumpError.value = result.error
-    return
+  try {
+    const result = await nativeApi.file.getPathInfo(path)
+    if (!result.ok) {
+      pathJumpError.value = result.error
+      return
+    }
+
+    const pathInfo = result.data
+    if (!pathInfo.exists || (pathInfo.type !== 'file' && pathInfo.type !== 'directory')) {
+      pathJumpError.value = '路径不存在。'
+      return
+    }
+
+    const project = findProjectForPath(pathInfo.path)
+    if (!project) {
+      const openResult = await nativeApi.file.openWithDefaultApp(pathInfo.path)
+      if (!openResult.ok) {
+        pathJumpError.value = openResult.error
+        return
+      }
+
+      pathJumpNotice.value = pathInfo.type === 'directory'
+        ? '文件夹不在已添加项目中，已用资源管理器打开。'
+        : '文件不在已添加项目中，已用默认应用打开。'
+      return
+    }
+
+    emit('jump-to-entry', {
+      name: pathInfo.name || baseName(pathInfo.path),
+      path: pathInfo.path,
+      type: pathInfo.type,
+      projectId: project.id,
+      projectRoot: project.path,
+      isProjectRoot: isProjectRootPath(project, pathInfo.path)
+    })
+    sidebarView.value = 'files'
+  } finally {
+    pathJumping.value = false
   }
-
-  const pathInfo = result.data
-  if (!pathInfo.exists || (pathInfo.type !== 'file' && pathInfo.type !== 'directory')) {
-    pathJumpError.value = '路径不存在。'
-    return
-  }
-
-  emit('jump-to-entry', {
-    name: pathInfo.name || baseName(pathInfo.path),
-    path: pathInfo.path,
-    type: pathInfo.type,
-    projectId: project.id,
-    projectRoot: project.path,
-    isProjectRoot: isProjectRootPath(project, pathInfo.path)
-  })
-  sidebarView.value = 'files'
 }
 
 function handleSortModeChange(event: Event): void {
@@ -597,6 +608,7 @@ watch(searchQuery, (query) => {
 
 watch(pathJumpValue, () => {
   pathJumpError.value = ''
+  pathJumpNotice.value = ''
 })
 
 watch(
