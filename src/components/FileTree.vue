@@ -2,12 +2,23 @@
   <div class="tree-node">
     <button
       class="tree-row"
-      :class="{ selected: selectedPath === node.path, root: node.isProjectRoot }"
+      :class="{
+        selected: selectedPath === node.path,
+        root: node.isProjectRoot,
+        dragging: draggedEntry?.path === node.path,
+        'drop-target': dropActive
+      }"
       :style="{ paddingLeft: `${10 + level * 16}px` }"
       type="button"
       :title="node.path"
+      :draggable="!node.isProjectRoot"
       @click="handleClick"
       @contextmenu.prevent="handleContextMenu"
+      @dragstart="handleDragStart"
+      @dragend="handleDragEnd"
+      @dragover="handleDragOver"
+      @dragleave="handleDragLeave"
+      @drop="handleDrop"
     >
       <span class="tree-caret" :class="{ invisible: node.type === 'file' }">
         {{ node.expanded ? '▾' : '▸' }}
@@ -33,21 +44,26 @@
         :selected-path="selectedPath"
         :refresh-key="refreshKey"
         :get-sort-mode="getSortMode"
+        :dragged-entry="draggedEntry"
         @open-file="$emit('open-file', $event)"
         @select-entry="$emit('select-entry', $event)"
         @context-menu="$emit('context-menu', $event)"
         @expanded-change="$emit('expanded-change', $event)"
+        @drag-start="$emit('drag-start', $event)"
+        @drag-end="$emit('drag-end')"
+        @move-entry="$emit('move-entry', $event)"
       />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { DirectoryEntry, FileSortMode, SelectedEntry, TreeNode } from '@/types'
 import { shouldDirectoryStartExpanded } from '@/stores/projectStore'
 import { sortFileEntries } from '@/utils/fileSort'
 import { nativeApi } from '@/utils/nativeApi'
+import { dirName, isSameOrChildPath } from '@/utils/path'
 
 const props = defineProps<{
   node: TreeNode
@@ -55,6 +71,7 @@ const props = defineProps<{
   selectedPath: string
   refreshKey: number
   getSortMode: (path: string) => FileSortMode
+  draggedEntry: SelectedEntry | null
 }>()
 
 const emit = defineEmits<{
@@ -62,9 +79,20 @@ const emit = defineEmits<{
   'select-entry': [entry: SelectedEntry]
   'context-menu': [payload: { entry: SelectedEntry; x: number; y: number }]
   'expanded-change': [payload: { path: string; expanded: boolean }]
+  'drag-start': [entry: SelectedEntry]
+  'drag-end': []
+  'move-entry': [payload: { entry: SelectedEntry; targetDirectory: SelectedEntry }]
 }>()
 
 const sortedChildren = computed(() => sortFileEntries(props.node.children ?? [], props.getSortMode(props.node.path)))
+const dropActive = ref(false)
+const canDropHere = computed(() => {
+  const source = props.draggedEntry
+  if (!source || source.isProjectRoot || props.node.type !== 'directory') return false
+  if (dirName(source.path).toLowerCase() === props.node.path.toLowerCase()) return false
+  if (source.type === 'directory' && isSameOrChildPath(source.path, props.node.path)) return false
+  return true
+})
 
 let disposed = false
 let loadInProgress = false
@@ -184,6 +212,56 @@ function handleContextMenu(event: MouseEvent): void {
     entry,
     x: event.clientX,
     y: event.clientY
+  })
+}
+
+function handleDragStart(event: DragEvent): void {
+  if (props.node.isProjectRoot || !event.dataTransfer) {
+    event.preventDefault()
+    return
+  }
+
+  const entry = toSelectedEntry()
+  event.dataTransfer.effectAllowed = 'move'
+  event.dataTransfer.setData('application/x-project-box-entry', JSON.stringify(entry))
+  event.dataTransfer.setData('text/plain', entry.path)
+  emit('drag-start', entry)
+}
+
+function handleDragEnd(): void {
+  dropActive.value = false
+  emit('drag-end')
+}
+
+function handleDragOver(event: DragEvent): void {
+  if (!canDropHere.value) return
+  event.preventDefault()
+  event.stopPropagation()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  dropActive.value = true
+}
+
+function handleDragLeave(event: DragEvent): void {
+  const currentTarget = event.currentTarget
+  const relatedTarget = event.relatedTarget
+  if (
+    currentTarget instanceof HTMLElement &&
+    relatedTarget instanceof Node &&
+    currentTarget.contains(relatedTarget)
+  ) {
+    return
+  }
+  dropActive.value = false
+}
+
+function handleDrop(event: DragEvent): void {
+  if (!canDropHere.value || !props.draggedEntry) return
+  event.preventDefault()
+  event.stopPropagation()
+  dropActive.value = false
+  emit('move-entry', {
+    entry: props.draggedEntry,
+    targetDirectory: toSelectedEntry()
   })
 }
 

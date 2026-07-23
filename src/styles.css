@@ -495,6 +495,17 @@ body.is-resizing .sidebar-resizer {
   color: #1d4ed8;
 }
 
+.tree-row.dragging {
+  opacity: 0.45;
+}
+
+.tree-row.drop-target {
+  outline: 2px solid #2563eb;
+  outline-offset: -2px;
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
 .tree-row.root {
   margin-top: 3px;
   font-weight: 700;
@@ -769,6 +780,100 @@ body.is-resizing .sidebar-resizer {
 .markdown-preview td {
   padding: 7px 10px;
   border: 1px solid #d8dde6;
+}
+
+.csv-preview {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  background: #ffffff;
+}
+
+.csv-preview-summary {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 14px;
+  padding: 6px 12px;
+  border-bottom: 1px solid #d8dde6;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.csv-preview-warning {
+  color: #b45309;
+}
+
+.csv-preview-empty {
+  display: grid;
+  min-height: 0;
+  flex: 1 1 auto;
+  place-items: center;
+  color: #64748b;
+}
+
+.csv-table-scroll {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+}
+
+.csv-table {
+  min-width: 100%;
+  border-spacing: 0;
+  border-collapse: separate;
+  color: #273142;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.csv-table th,
+.csv-table td {
+  max-width: 360px;
+  padding: 6px 9px;
+  overflow: hidden;
+  border-right: 1px solid #e2e8f0;
+  border-bottom: 1px solid #e2e8f0;
+  text-align: left;
+  text-overflow: ellipsis;
+}
+
+.csv-table thead th {
+  position: sticky;
+  z-index: 2;
+  top: 0;
+  background: #eef2f7;
+  color: #334155;
+  font-weight: 700;
+}
+
+.csv-table tbody tr:nth-child(even) td,
+.csv-table tbody tr:nth-child(even) .csv-row-number {
+  background: #f8fafc;
+}
+
+.csv-table tbody tr:hover td,
+.csv-table tbody tr:hover .csv-row-number {
+  background: #eff6ff;
+}
+
+.csv-table .csv-row-number {
+  position: sticky;
+  z-index: 1;
+  left: 0;
+  width: 52px;
+  min-width: 52px;
+  background: #f8fafc;
+  color: #94a3b8;
+  font-weight: 500;
+  text-align: right;
+}
+
+.csv-table thead .csv-row-number {
+  z-index: 3;
+  background: #e2e8f0;
 }
 
 .media-preview {

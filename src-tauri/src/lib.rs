@@ -28,7 +28,7 @@ struct OpenedFileRef {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 struct AppSettings {
     font_size: u32,
     sidebar_width: u32,
@@ -39,7 +39,7 @@ struct AppSettings {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 struct AppConfig {
     projects: Vec<ProjectItem>,
     opened_files: Vec<OpenedFileRef>,
@@ -85,8 +85,26 @@ struct PathInfo {
 }
 
 const CONFIG_FILE_NAME: &str = "project-box-config.json";
+const CONFIG_BACKUP_FILE_NAME: &str = "project-box-config.backup.json";
 const MAX_TEXT_EDIT_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_MEDIA_PREVIEW_BYTES: u64 = 100 * 1024 * 1024;
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            font_size: 14,
+            sidebar_width: 280,
+            file_sort_mode: default_file_sort_mode(),
+            folder_sort_modes: HashMap::new(),
+        }
+    }
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        default_config()
+    }
+}
 
 fn default_config() -> AppConfig {
     AppConfig {
@@ -96,12 +114,7 @@ fn default_config() -> AppConfig {
         active_project_id: Some(String::new()),
         expanded_paths: vec![],
         tree_state_initialized: false,
-        settings: AppSettings {
-            font_size: 14,
-            sidebar_width: 280,
-            file_sort_mode: default_file_sort_mode(),
-            folder_sort_modes: HashMap::new(),
-        },
+        settings: AppSettings::default(),
     }
 }
 
@@ -155,29 +168,100 @@ fn config_path() -> Result<PathBuf, String> {
     Ok(config_dir()?.join(CONFIG_FILE_NAME))
 }
 
+fn config_backup_path() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join(CONFIG_BACKUP_FILE_NAME))
+}
+
+fn read_config_file(path: &Path) -> Result<AppConfig, String> {
+    let raw = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    serde_json::from_str(&raw).map_err(|error| error.to_string())
+}
+
+fn write_config_file(path: &Path, config: &AppConfig, backup_existing: bool) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| err("保存配置", "配置路径无效"))?;
+    fs::create_dir_all(parent).map_err(|error| err("创建配置目录", error))?;
+
+    let raw = serde_json::to_string_pretty(config).map_err(|error| err("序列化配置", error))?;
+    let temp_path = parent.join(format!("{CONFIG_FILE_NAME}.tmp-{}", std::process::id()));
+    let backup_path = parent.join(CONFIG_BACKUP_FILE_NAME);
+
+    let mut temp_file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temp_path)
+        .map_err(|error| err("创建配置临时文件", error))?;
+    temp_file
+        .write_all(format!("{raw}\n").as_bytes())
+        .map_err(|error| err("写入配置临时文件", error))?;
+    temp_file
+        .sync_all()
+        .map_err(|error| err("同步配置临时文件", error))?;
+    drop(temp_file);
+
+    if backup_existing && path.exists() && read_config_file(path).is_ok() {
+        fs::copy(path, &backup_path).map_err(|error| err("备份配置", error))?;
+    }
+
+    if path.exists() {
+        fs::remove_file(path).map_err(|error| err("替换旧配置", error))?;
+    }
+
+    if let Err(error) = fs::rename(&temp_path, path) {
+        if backup_path.exists() {
+            let _ = fs::copy(&backup_path, path);
+        }
+        let _ = fs::remove_file(&temp_path);
+        return Err(err("保存配置", error));
+    }
+
+    if !backup_path.exists() {
+        fs::copy(path, backup_path).map_err(|error| err("创建配置备份", error))?;
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 fn get_config() -> Result<AppConfig, String> {
     let path = config_path().map_err(|error| err("读取配置", error))?;
+    let backup_path = config_backup_path().map_err(|error| err("读取配置", error))?;
 
     if !path.exists() {
+        if backup_path.exists() {
+            let config =
+                read_config_file(&backup_path).map_err(|error| err("恢复配置备份", error))?;
+            write_config_file(&path, &config, false)?;
+            return Ok(config);
+        }
+
         let config = default_config();
         save_config(config.clone())?;
         return Ok(config);
     }
 
-    let raw = fs::read_to_string(&path).map_err(|error| err("读取配置", error))?;
-    serde_json::from_str(&raw).map_err(|error| err("解析配置", error))
+    match read_config_file(&path) {
+        Ok(config) => Ok(config),
+        Err(main_error) if backup_path.exists() => {
+            let config = read_config_file(&backup_path).map_err(|backup_error| {
+                err(
+                    "恢复配置",
+                    format!("主配置不可用：{main_error}；备份也不可用：{backup_error}"),
+                )
+            })?;
+            write_config_file(&path, &config, false)?;
+            Ok(config)
+        }
+        Err(error) => Err(err("解析配置", error)),
+    }
 }
 
 #[tauri::command]
 fn save_config(config: AppConfig) -> Result<(), String> {
     let path = config_path().map_err(|error| err("保存配置", error))?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| err("保存配置", "配置路径无效"))?;
-    fs::create_dir_all(parent).map_err(|error| err("创建配置目录", error))?;
-    let raw = serde_json::to_string_pretty(&config).map_err(|error| err("序列化配置", error))?;
-    fs::write(path, format!("{raw}\n")).map_err(|error| err("保存配置", error))
+    write_config_file(&path, &config, true)
 }
 
 #[tauri::command]
@@ -321,6 +405,44 @@ fn rename_path(old_path: String, new_path: String) -> Result<(), String> {
     }
 
     fs::rename(old_path, new_path).map_err(|error| err("重命名", error))
+}
+
+#[tauri::command]
+fn move_path(source_path: String, target_directory: String) -> Result<String, String> {
+    let source = PathBuf::from(&source_path);
+    let target_dir = PathBuf::from(&target_directory);
+
+    let source_metadata = fs::metadata(&source).map_err(|error| err("移动", error))?;
+    let target_metadata = fs::metadata(&target_dir).map_err(|error| err("移动", error))?;
+    if !target_metadata.is_dir() {
+        return Err(err("移动", "目标不是文件夹"));
+    }
+
+    let source_name = source
+        .file_name()
+        .ok_or_else(|| err("移动", "无法识别源文件名"))?;
+    let target = target_dir.join(source_name);
+
+    let source_key = path_to_string(&source).replace('\\', "/").to_lowercase();
+    let target_key = path_to_string(&target).replace('\\', "/").to_lowercase();
+    if source_key == target_key {
+        return Ok(path_to_string(source));
+    }
+
+    if target.exists() {
+        return Err(err("移动", format!("目标已存在：{}", file_name(&target))));
+    }
+
+    if source_metadata.is_dir() {
+        let source_canonical = fs::canonicalize(&source).map_err(|error| err("移动", error))?;
+        let target_canonical = fs::canonicalize(&target_dir).map_err(|error| err("移动", error))?;
+        if target_canonical.starts_with(&source_canonical) {
+            return Err(err("移动", "不能把文件夹移动到它自身内部"));
+        }
+    }
+
+    fs::rename(&source, &target).map_err(|error| err("移动", error))?;
+    Ok(path_to_string(target))
 }
 
 #[tauri::command]
@@ -749,6 +871,7 @@ pub fn run() {
             create_file,
             create_folder,
             rename_path,
+            move_path,
             delete_path,
             open_with_default_app,
             reveal_in_explorer,
@@ -766,16 +889,20 @@ mod read_dir_tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    #[test]
-    fn read_dir_keeps_all_regular_files_and_directories_visible() {
+    fn temp_root(label: &str) -> PathBuf {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("系统时间无效")
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "project-box-read-dir-{}-{suffix}",
+        std::env::temp_dir().join(format!(
+            "project-box-{label}-{}-{suffix}",
             std::process::id()
-        ));
+        ))
+    }
+
+    #[test]
+    fn read_dir_keeps_all_regular_files_and_directories_visible() {
+        let root = temp_root("read-dir");
 
         for directory in [".git", "node_modules", "target", "普通目录"] {
             fs::create_dir_all(root.join(directory)).expect("创建测试目录失败");
@@ -806,5 +933,45 @@ mod read_dir_tests {
                 "目录列表缺少 {expected}"
             );
         }
+    }
+
+    #[test]
+    fn config_write_keeps_the_previous_valid_backup() {
+        let root = temp_root("config");
+        let path = root.join(CONFIG_FILE_NAME);
+        let backup_path = root.join(CONFIG_BACKUP_FILE_NAME);
+        let first = default_config();
+        write_config_file(&path, &first, true).expect("首次保存配置失败");
+
+        let mut second = first.clone();
+        second.settings.sidebar_width = 412;
+        write_config_file(&path, &second, true).expect("再次保存配置失败");
+
+        let saved = read_config_file(&path).expect("读取主配置失败");
+        let backup = read_config_file(&backup_path).expect("读取配置备份失败");
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(saved.settings.sidebar_width, 412);
+        assert_eq!(backup.settings.sidebar_width, first.settings.sidebar_width);
+    }
+
+    #[test]
+    fn move_path_moves_a_file_into_the_target_directory() {
+        let root = temp_root("move");
+        let target_dir = root.join("目标文件夹");
+        fs::create_dir_all(&target_dir).expect("创建目标目录失败");
+        let source = root.join("测试.md");
+        fs::write(&source, "content").expect("创建测试文件失败");
+
+        let moved_path = move_path(path_to_string(&source), path_to_string(&target_dir))
+            .expect("移动测试文件失败");
+        let moved = PathBuf::from(moved_path);
+        let source_exists = source.exists();
+        let moved_exists = moved.exists();
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(moved, target_dir.join("测试.md"));
+        assert!(!source_exists);
+        assert!(moved_exists);
     }
 }

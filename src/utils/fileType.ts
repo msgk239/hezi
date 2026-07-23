@@ -59,6 +59,10 @@ export function isDefaultAppVideoFile(path: string): boolean {
   return DEFAULT_APP_VIDEO_EXTENSIONS.has(extensionName(path))
 }
 
+export function isCsvFile(path: string): boolean {
+  return extensionName(path) === '.csv'
+}
+
 export function getSupportedFileKind(path: string): EditorTabKind {
   if (isSupportedImageFile(path)) return 'image'
   if (isSupportedAudioFile(path)) return 'audio'

@@ -30,6 +30,50 @@ export function getOpenedFileRefs(): OpenedFileRef[] {
   }))
 }
 
+export interface RefreshOpenFilesResult {
+  refreshed: number
+  skippedDirty: number
+  errors: string[]
+}
+
+export async function refreshActiveFile(): Promise<RefreshOpenFilesResult> {
+  const result: RefreshOpenFilesResult = {
+    refreshed: 0,
+    skippedDirty: 0,
+    errors: []
+  }
+  const tab = activeTab.value
+  if (!tab) return result
+
+  if (isTabDirty(tab)) {
+    result.skippedDirty = 1
+    return result
+  }
+
+  if (tab.kind === 'text') {
+    const readResult = await nativeApi.file.readFile(tab.path)
+    if (!readResult.ok) {
+      result.errors.push(`${tab.name}：${readResult.error}`)
+      return result
+    }
+
+    tab.content = readResult.data
+    tab.savedContent = readResult.data
+    result.refreshed = 1
+    return result
+  }
+
+  const readResult = await nativeApi.file.readMediaFile(tab.path)
+  if (!readResult.ok) {
+    result.errors.push(`${tab.name}：${readResult.error}`)
+  } else {
+    tab.mediaSrc = `data:${getMediaMimeType(tab.path)};base64,${readResult.data}`
+    result.refreshed = 1
+  }
+
+  return result
+}
+
 export async function openFile(project: ProjectItem, filePath: string): Promise<boolean> {
   editorState.notice = ''
 
@@ -203,12 +247,20 @@ export async function closeTabsUnderPath(
   return true
 }
 
-export function updateTabsForRenamedPath(oldPath: string, newPath: string): void {
+function updateTabsForPathChange(
+  oldPath: string,
+  newPath: string,
+  targetProject?: Pick<ProjectItem, 'id' | 'path'>
+): void {
   for (const tab of editorState.tabs) {
     if (!isSameOrChildPath(oldPath, tab.path)) continue
 
     tab.path = replacePathPrefix(tab.path, oldPath, newPath)
     tab.name = baseName(tab.path)
+    if (targetProject) {
+      tab.projectId = targetProject.id
+      tab.projectRoot = targetProject.path
+    }
     tab.kind = getSupportedFileKind(tab.path)
     tab.language = tab.kind === 'text' ? getLanguageFromPath(tab.path) : ''
     if (tab.kind === 'text') {
@@ -217,10 +269,23 @@ export function updateTabsForRenamedPath(oldPath: string, newPath: string): void
       tab.content = ''
       tab.savedContent = ''
     }
-    if (editorState.activePath && isSameOrChildPath(oldPath, editorState.activePath)) {
-      editorState.activePath = replacePathPrefix(editorState.activePath, oldPath, newPath)
-    }
   }
+
+  if (editorState.activePath && isSameOrChildPath(oldPath, editorState.activePath)) {
+    editorState.activePath = replacePathPrefix(editorState.activePath, oldPath, newPath)
+  }
+}
+
+export function updateTabsForRenamedPath(oldPath: string, newPath: string): void {
+  updateTabsForPathChange(oldPath, newPath)
+}
+
+export function updateTabsForMovedPath(
+  oldPath: string,
+  newPath: string,
+  targetProject: Pick<ProjectItem, 'id' | 'path'>
+): void {
+  updateTabsForPathChange(oldPath, newPath, targetProject)
 }
 
 export function removeTabsForProject(projectId: string): void {

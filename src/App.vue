@@ -36,6 +36,7 @@
         @expanded-change="handleTreeExpandedChange"
         @sort-mode-change="handleSortModeChange"
         @jump-to-entry="handleJumpToEntry"
+        @move-entry="handleMoveEntry"
         @refresh="handleTreeRefresh"
       />
 
@@ -50,7 +51,7 @@
           @context-menu="openTabContextMenu"
         />
 
-        <div v-if="activeTab && isMarkdownActive" class="editor-modebar">
+        <div v-if="activeTab && (isMarkdownActive || isCsvActive)" class="editor-modebar">
           <button
             class="mode-button"
             :class="{ active: markdownMode === 'edit' }"
@@ -65,7 +66,7 @@
             type="button"
             @click="markdownMode = 'preview'"
           >
-            预览
+            {{ isCsvActive ? '表格预览' : '预览' }}
           </button>
         </div>
 
@@ -78,6 +79,11 @@
 
           <MarkdownPreview
             v-else-if="activeTab && isMarkdownActive && markdownMode === 'preview'"
+            :content="activeTab.content"
+          />
+
+          <CsvPreview
+            v-else-if="activeTab && isCsvActive && markdownMode === 'preview'"
             :content="activeTab.content"
           />
 
@@ -208,6 +214,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import CodeEditor from '@/components/CodeEditor.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
+import CsvPreview from '@/components/CsvPreview.vue'
 import EditorTabs from '@/components/EditorTabs.vue'
 import MarkdownPreview from '@/components/MarkdownPreview.vue'
 import MediaPreview from '@/components/MediaPreview.vue'
@@ -238,10 +245,12 @@ import {
   getOpenedFileRefs,
   isTabDirty,
   openFile,
+  refreshActiveFile,
   removeTabsForProject,
   restoreOpenedFiles,
   saveActiveTab,
   setActiveTab,
+  updateTabsForMovedPath,
   updateTabsForRenamedPath
 } from '@/stores/editorStore'
 import type {
@@ -254,7 +263,7 @@ import type {
   ShortcutAction,
   UnsavedChoice
 } from '@/types'
-import { isDefaultAppVideoFile, isSupportedTextFile } from '@/utils/fileType'
+import { isCsvFile, isDefaultAppVideoFile, isSupportedTextFile } from '@/utils/fileType'
 import { nativeApi } from '@/utils/nativeApi'
 import { baseName, dirName, isUnsafeRelativeInput, joinPath, normalizeSlashes, replaceBaseName } from '@/utils/path'
 
@@ -303,13 +312,16 @@ const settingsDraft = reactive({
 
 const selectedPath = computed(() => projectState.selectedEntry?.path || editorState.activePath)
 const isMarkdownActive = computed(() => activeTab.value?.kind === 'text' && activeTab.value.language === 'markdown')
+const isCsvActive = computed(() => Boolean(activeTab.value && isCsvFile(activeTab.value.path)))
 const DEFAULT_APP_OPEN_DEBOUNCE_MS = 800
 
 let removeCloseListener: (() => void) | null = null
 let noticeTimer: number | undefined
+let autoPersistTimer: number | undefined
 let resizingSidebar = false
 let lastDefaultAppOpenPath = ''
 let lastDefaultAppOpenAt = 0
+let configSaveChain = Promise.resolve()
 
 function hasTauriRuntime(): boolean {
   return Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__)
@@ -336,15 +348,39 @@ function getProject(projectId: string): ProjectItem | undefined {
   return projectState.projects.find((project) => project.id === projectId)
 }
 
-function handleTreeRefresh(): void {
+async function handleTreeRefresh(): Promise<void> {
   treeRefreshKey.value += 1
-  showNotice('项目文件已刷新。')
+  const result = await refreshActiveFile()
+
+  if (result.errors.length > 0) {
+    showNotice(`目录已刷新；${result.errors.length} 个文件重读失败：${result.errors[0]}`)
+    return
+  }
+
+  if (result.skippedDirty > 0) {
+    showNotice('目录已刷新；当前文件有未保存修改，为避免覆盖已跳过重读。')
+    return
+  }
+
+  showNotice(result.refreshed > 0 ? '目录已刷新，当前文件已从磁盘重读。' : '项目文件已刷新。')
 }
 
 async function persistConfig(): Promise<void> {
   const config = buildConfig(getOpenedFileRefs(), editorState.activePath)
-  const result = await nativeApi.project.saveConfig(config)
-  if (!result.ok) showNotice(result.error)
+  const save = async (): Promise<void> => {
+    const result = await nativeApi.project.saveConfig(config)
+    if (!result.ok) showNotice(result.error)
+  }
+  configSaveChain = configSaveChain.then(save, save)
+  await configSaveChain
+}
+
+function scheduleConfigPersist(): void {
+  if (!projectState.loaded) return
+  window.clearTimeout(autoPersistTimer)
+  autoPersistTimer = window.setTimeout(() => {
+    void persistConfig()
+  }, 300)
 }
 
 async function handleTreeExpandedChange(payload: { path: string; expanded: boolean }): Promise<void> {
@@ -797,6 +833,42 @@ async function renameEntry(entry: SelectedEntry): Promise<void> {
   await persistConfig()
 }
 
+async function handleMoveEntry(payload: {
+  entry: SelectedEntry
+  targetDirectory: SelectedEntry
+}): Promise<void> {
+  const { entry, targetDirectory } = payload
+  if (entry.isProjectRoot || targetDirectory.type !== 'directory') return
+
+  const targetProject = getProject(targetDirectory.projectId)
+  if (!targetProject) {
+    showNotice('移动失败：目标项目已不存在。')
+    return
+  }
+
+  const result = await nativeApi.file.movePath(entry.path, targetDirectory.path)
+  if (!result.ok) {
+    showNotice(result.error)
+    return
+  }
+
+  const newPath = result.data
+  updateTabsForMovedPath(entry.path, newPath, targetProject)
+  replaceExpandedPathPrefix(entry.path, newPath)
+  setPathExpanded(targetDirectory.path, true)
+  setSelectedEntry({
+    ...entry,
+    name: baseName(newPath),
+    path: newPath,
+    projectId: targetProject.id,
+    projectRoot: targetProject.path,
+    isProjectRoot: false
+  })
+  treeRefreshKey.value += 1
+  await persistConfig()
+  showNotice(`已移动到：${targetDirectory.name}`)
+}
+
 async function deleteEntry(entry: SelectedEntry): Promise<void> {
   const confirmed = await askConfirm(
     '确认删除',
@@ -1084,6 +1156,21 @@ watch(
   (message) => showNotice(message)
 )
 
+watch(
+  () => [
+    projectState.projects.map((project) => `${project.id}:${project.name}:${project.path}`).join('|'),
+    projectState.selectedProjectId,
+    projectState.expandedPaths.join('|'),
+    projectState.settings.fontSize,
+    projectState.settings.sidebarWidth,
+    projectState.settings.fileSortMode,
+    JSON.stringify(projectState.settings.folderSortModes),
+    editorState.tabs.map((tab) => `${tab.projectId}:${tab.path}`).join('|'),
+    editorState.activePath
+  ],
+  scheduleConfigPersist
+)
+
 onMounted(async () => {
   if (hasTauriRuntime()) {
     removeCloseListener = await getCurrentWindow().onCloseRequested((event) => {
@@ -1098,6 +1185,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   removeCloseListener?.()
+  window.clearTimeout(autoPersistTimer)
   window.removeEventListener('keydown', handleRendererKeydown)
   window.removeEventListener('beforeunload', handleBeforeUnload)
   window.removeEventListener('mousemove', handleSidebarResize)

@@ -179,10 +179,14 @@
               :selected-path="selectedPath"
               :refresh-key="refreshKey"
               :get-sort-mode="getFolderSortModeForPath"
+              :dragged-entry="draggedEntry"
               @open-file="$emit('open-file', $event)"
               @select-entry="$emit('select-entry', $event)"
               @context-menu="$emit('context-menu', $event)"
               @expanded-change="$emit('expanded-change', $event)"
+              @drag-start="draggedEntry = $event"
+              @drag-end="draggedEntry = null"
+              @move-entry="handleMoveEntry"
             />
           </div>
         </template>
@@ -223,6 +227,7 @@ const emit = defineEmits<{
   'expanded-change': [payload: { path: string; expanded: boolean }]
   'sort-mode-change': [mode: FileSortMode]
   'jump-to-entry': [entry: SelectedEntry]
+  'move-entry': [payload: { entry: SelectedEntry; targetDirectory: SelectedEntry }]
   refresh: []
 }>()
 
@@ -256,6 +261,7 @@ const MAX_SEARCH_DIRECTORIES = 1500
 const MAX_SEARCH_DEPTH = 40
 
 const rootNodes = ref<TreeNode[]>([])
+const draggedEntry = ref<SelectedEntry | null>(null)
 const sidebarView = ref<SidebarView>('files')
 const searchInputRef = ref<HTMLInputElement | null>(null)
 const pathJumpInputRef = ref<HTMLInputElement | null>(null)
@@ -587,6 +593,11 @@ function formatModifiedAt(value?: number): string {
     hour: '2-digit',
     minute: '2-digit'
   }).format(date)
+}
+
+function handleMoveEntry(payload: { entry: SelectedEntry; targetDirectory: SelectedEntry }): void {
+  draggedEntry.value = null
+  emit('move-entry', payload)
 }
 
 watch(

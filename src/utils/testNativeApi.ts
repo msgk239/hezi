@@ -28,6 +28,12 @@ const fileContents: Record<string, string> = {
     'version = 1',
     'requires-python = ">=3.12"'
   ].join('\n'),
+  [`${projectRoot}\\preview.csv`]: [
+    '姓名,城市,备注',
+    '小王,上海,"包含,逗号"',
+    '小李,北京,"支持',
+    '单元格内换行"'
+  ].join('\n'),
   [`${projectRoot}\\.gitignore`]: ['# ignore comment should be highlighted', 'dist/', 'release-tauri/'].join('\n'),
   [`${projectRoot}\\.gitattributes`]: ['# attributes comment should be highlighted', '* text=auto'].join('\n')
 }
@@ -121,7 +127,10 @@ export function installProjectBoxTestNative(): void {
   const api: NativeApi = {
     project: {
       getConfig: async () => ok(config),
-      saveConfig: async () => ok(undefined),
+      saveConfig: async (savedConfig) => {
+        Object.assign(config, JSON.parse(JSON.stringify(savedConfig)) as AppConfig)
+        return ok(undefined)
+      },
       selectProjectFolder: async () => ok(null)
     },
     file: {
@@ -141,6 +150,12 @@ export function installProjectBoxTestNative(): void {
         fileContents[newPath] = fileContents[oldPath] ?? ''
         delete fileContents[oldPath]
         return ok(undefined)
+      },
+      movePath: async (sourcePath, targetDirectory) => {
+        const newPath = `${targetDirectory}\\${baseName(sourcePath)}`
+        fileContents[newPath] = fileContents[sourcePath] ?? ''
+        delete fileContents[sourcePath]
+        return ok(newPath)
       },
       deletePath: async (path) => {
         delete fileContents[path]

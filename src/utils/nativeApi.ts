@@ -21,6 +21,7 @@ export interface NativeApi {
     createFile(filePath: string): Promise<ApiResult<void>>
     createFolder(folderPath: string): Promise<ApiResult<void>>
     renamePath(oldPath: string, newPath: string): Promise<ApiResult<void>>
+    movePath(sourcePath: string, targetDirectory: string): Promise<ApiResult<string>>
     deletePath(path: string): Promise<ApiResult<void>>
     openWithDefaultApp(path: string): Promise<ApiResult<void>>
     revealInExplorer(path: string): Promise<ApiResult<void>>
@@ -73,6 +74,9 @@ export const nativeApi: NativeApi = {
       testApi()?.file.createFolder(folderPath) ?? call<void>('create_folder', { folderPath }),
     renamePath: (oldPath, newPath) =>
       testApi()?.file.renamePath(oldPath, newPath) ?? call<void>('rename_path', { oldPath, newPath }),
+    movePath: (sourcePath, targetDirectory) =>
+      testApi()?.file.movePath(sourcePath, targetDirectory) ??
+      call<string>('move_path', { sourcePath, targetDirectory }),
     deletePath: (path) => testApi()?.file.deletePath(path) ?? call<void>('delete_path', { path }),
     openWithDefaultApp: (path) =>
       testApi()?.file.openWithDefaultApp(path) ?? call<void>('open_with_default_app', { path }),
